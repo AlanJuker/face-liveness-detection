@@ -106,6 +106,19 @@ export class Verification implements OnInit, OnDestroy {
   /** Fotogramas seguidos con encuadre correcto antes de iniciar los retos. */
   private stableFrames = 0;
 
+  // --- Estado anti-suplantación (los gestos deben ser TRANSICIONES) ---
+  /** Fotograma anterior, para medir el movimiento de la cabeza/imagen. */
+  private prevFrame: LiveFrame | null = null;
+  /** Sonrisa: primero debe verse un gesto serio (una foto sonriente no puede). */
+  private neutralFrames = 0;
+  private neutralSeen = false;
+  /** Giro: primero de frente, luego girar y regresar al centro. */
+  private frontalFrames = 0;
+  private frontalSeen = false;
+  private turnedSeen = false;
+  /** Continuidad: si el rostro desaparece demasiado tiempo, la prueba falla. */
+  private faceAbsentSince = 0;
+
   private static readonly CHALLENGE_SECONDS = 20;
   private static readonly SETTLE_MS = 1500;
   private static readonly STABLE_FRAMES_REQUIRED = 6;
@@ -126,7 +139,16 @@ export class Verification implements OnInit, OnDestroy {
   private static readonly REOPEN_ABSOLUTE = 0.3;
   private static readonly CLOSED_FRAMES_REQUIRED = 2;
   private static readonly SMILE_MIN = 0.65;
+  /** Antes de sonreír debe verse un gesto claramente serio. */
+  private static readonly NEUTRAL_MAX = 0.3;
   private static readonly YAW_MIN = 0.32;
+  /** Movimiento máximo entre fotogramas para considerar la cabeza quieta
+   * (mover o inclinar un teléfono con una foto desplaza toda la imagen). */
+  private static readonly STILL_CENTER_DELTA = 0.03;
+  private static readonly STILL_WIDTH_DELTA = 0.035;
+  private static readonly STILL_YAW_DELTA = 0.09;
+  /** Si el rostro desaparece más de este tiempo durante la prueba, falla. */
+  private static readonly ABSENCE_LIMIT_MS = 3000;
   /** El parpadeo solo se evalúa con la cabeza de frente (evita falsos
    * positivos: al girar la cabeza los landmarks de los ojos se estrechan). */
   private static readonly FRONTAL_YAW_MAX = 0.18;
@@ -227,13 +249,14 @@ export class Verification implements OnInit, OnDestroy {
       {
         id: 'smile',
         title: 'Sonrisa',
-        instruction: 'Sonría de forma visible mirando a la cámara.',
+        instruction: 'Mire de frente con gesto serio y, cuando se le indique, sonría ampliamente.',
         done: false,
       },
       {
         id: 'turn',
         title: 'Giro de cabeza',
-        instruction: 'Gire lentamente la cabeza hacia su izquierda o su derecha.',
+        instruction:
+          'Mire de frente, gire lentamente la cabeza hacia un lado y regrese al centro.',
         done: false,
       },
     ];
@@ -259,9 +282,35 @@ export class Verification implements OnInit, OnDestroy {
     this.baselineEyeOpenness = 0;
     this.consecutiveClosedFrames = 0;
     this.eyesClosedConfirmed = false;
+    this.neutralFrames = 0;
+    this.neutralSeen = false;
+    this.frontalFrames = 0;
+    this.frontalSeen = false;
+    this.turnedSeen = false;
+    this.faceAbsentSince = 0;
     this.liveFeedback.set('');
     this.challengeDeadline = Date.now() + Verification.CHALLENGE_SECONDS * 1000;
     this.secondsLeft.set(Verification.CHALLENGE_SECONDS);
+  }
+
+  /**
+   * La cabeza está quieta si el rostro apenas se movió respecto al fotograma
+   * anterior. Mover, acercar o inclinar un teléfono con una foto desplaza y
+   * escala toda la imagen a la vez, lo que rompe esta condición.
+   */
+  private isStill(frame: LiveFrame): boolean {
+    const prev = this.prevFrame;
+    if (!prev) return false;
+    const dcx = Math.abs(frame.box.x + frame.box.width / 2 - (prev.box.x + prev.box.width / 2));
+    const dcy = Math.abs(frame.box.y + frame.box.height / 2 - (prev.box.y + prev.box.height / 2));
+    const dw = Math.abs(frame.box.width - prev.box.width);
+    const dyaw = Math.abs(frame.yaw - prev.yaw);
+    return (
+      dcx < Verification.STILL_CENTER_DELTA &&
+      dcy < Verification.STILL_CENTER_DELTA &&
+      dw < Verification.STILL_WIDTH_DELTA &&
+      dyaw < Verification.STILL_YAW_DELTA
+    );
   }
 
   // ---- bucle principal de análisis (~8 fotogramas por segundo) ----
@@ -309,9 +358,25 @@ export class Verification implements OnInit, OnDestroy {
   private tickTesting(frame: LiveFrame | null): void {
     const now = Date.now();
 
+    // Continuidad: si el rostro desaparece demasiado tiempo (p. ej. para
+    // cambiar la imagen de un teléfono), la prueba falla por completo.
+    if (!frame) {
+      if (this.faceAbsentSince === 0) this.faceAbsentSince = now;
+      if (now - this.faceAbsentSince > Verification.ABSENCE_LIMIT_MS) {
+        this.phase.set('failed');
+        this.failReason.set(
+          'Se perdió la continuidad del rostro durante la prueba. Manténgase frente a la cámara todo el tiempo.',
+        );
+        return;
+      }
+    } else {
+      this.faceAbsentSince = 0;
+    }
+
     // Pausa de asentamiento entre retos: no se evalúa ni corre el tiempo.
     if (now < this.settleUntil) {
       this.challengeDeadline = now + Verification.CHALLENGE_SECONDS * 1000;
+      this.prevFrame = frame ?? this.prevFrame;
       return;
     }
 
@@ -319,6 +384,7 @@ export class Verification implements OnInit, OnDestroy {
     // se pausa la evaluación y el temporizador no avanza en su contra.
     if (!frame || !this.faceOk()) {
       this.challengeDeadline += 120;
+      this.prevFrame = frame ?? this.prevFrame;
       return;
     }
 
@@ -332,6 +398,7 @@ export class Verification implements OnInit, OnDestroy {
     }
 
     this.evaluate(frame);
+    this.prevFrame = frame;
   }
 
   private evaluate(frame: LiveFrame): void {
@@ -344,14 +411,10 @@ export class Verification implements OnInit, OnDestroy {
         passed = this.evaluateBlink(frame);
         break;
       case 'smile':
-        // La sonrisa solo cuenta mirando de frente (mejor foto y sin arrastre
-        // de un giro anterior).
-        passed =
-          frame.smile > Verification.SMILE_MIN &&
-          Math.abs(frame.yaw) < Verification.FRONTAL_YAW_MAX;
+        passed = this.evaluateSmile(frame);
         break;
       case 'turn':
-        passed = Math.abs(frame.yaw) > Verification.YAW_MIN;
+        passed = this.evaluateTurn(frame);
         break;
     }
 
@@ -406,7 +469,20 @@ export class Verification implements OnInit, OnDestroy {
       if (!this.liveFeedback()) this.liveFeedback.set('Mire de frente a la cámara para continuar.');
       return false;
     }
-    if (this.liveFeedback() === 'Mire de frente a la cámara para continuar.') {
+    // La cabeza (y la cámara) deben estar quietas: inclinar o mover un
+    // teléfono con una foto desplaza toda la imagen y simula un parpadeo.
+    if (!this.isStill(frame)) {
+      this.consecutiveClosedFrames = 0;
+      this.eyesClosedConfirmed = false;
+      if (!this.liveFeedback()) {
+        this.liveFeedback.set('Mantenga la cabeza quieta y parpadee.');
+      }
+      return false;
+    }
+    if (
+      this.liveFeedback() === 'Mire de frente a la cámara para continuar.' ||
+      this.liveFeedback() === 'Mantenga la cabeza quieta y parpadee.'
+    ) {
       this.liveFeedback.set('');
     }
 
@@ -433,6 +509,68 @@ export class Verification implements OnInit, OnDestroy {
     }
 
     return ear > Verification.REOPEN_ABSOLUTE || ratio > Verification.REOPEN_RATIO;
+  }
+
+  /**
+   * La sonrisa debe ser una TRANSICIÓN: primero un gesto serio sostenido y
+   * después la sonrisa. Una fotografía sonriente nunca muestra el gesto serio
+   * y una fotografía seria nunca sonríe: ninguna de las dos puede pasar.
+   */
+  private evaluateSmile(frame: LiveFrame): boolean {
+    const frontal = Math.abs(frame.yaw) < Verification.FRONTAL_YAW_MAX;
+
+    if (!this.neutralSeen) {
+      if (frontal && frame.smile < Verification.NEUTRAL_MAX && this.isStill(frame)) {
+        this.neutralFrames++;
+        if (this.neutralFrames >= 3) {
+          this.neutralSeen = true;
+          this.liveFeedback.set('Perfecto. Ahora sonría ampliamente.');
+        }
+      } else {
+        this.neutralFrames = 0;
+        if (!this.liveFeedback()) {
+          this.liveFeedback.set('Primero mire de frente con gesto serio, sin sonreír.');
+        }
+      }
+      return false;
+    }
+
+    return frame.smile > Verification.SMILE_MIN && frontal;
+  }
+
+  /**
+   * El giro también es una transición completa: de frente → girar → volver al
+   * centro. Inclinar un teléfono con una foto genera un giro aparente, pero
+   * difícilmente la secuencia completa con el rostro estable y encuadrado.
+   */
+  private evaluateTurn(frame: LiveFrame): boolean {
+    const frontal = Math.abs(frame.yaw) < Verification.FRONTAL_YAW_MAX;
+
+    if (!this.frontalSeen) {
+      if (frontal && this.isStill(frame)) {
+        this.frontalFrames++;
+        if (this.frontalFrames >= 3) {
+          this.frontalSeen = true;
+          this.liveFeedback.set('Ahora gire la cabeza hacia un lado.');
+        }
+      } else {
+        this.frontalFrames = 0;
+        if (!this.liveFeedback()) {
+          this.liveFeedback.set('Mire de frente a la cámara y manténgase quieto un momento.');
+        }
+      }
+      return false;
+    }
+
+    if (!this.turnedSeen) {
+      if (Math.abs(frame.yaw) > Verification.YAW_MIN) {
+        this.turnedSeen = true;
+        this.liveFeedback.set('Bien. Regrese la mirada al centro.');
+      }
+      return false;
+    }
+
+    return frontal;
   }
 
   /** El centro del rostro debe caer dentro del óvalo guía. */
