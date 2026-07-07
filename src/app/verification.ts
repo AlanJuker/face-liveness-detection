@@ -11,7 +11,11 @@ import {
 import { FaceRecognitionService, LiveFrame } from './face-recognition.service';
 import { PhotoStorageService } from './photo-storage.service';
 
-type Phase = 'loading' | 'camera-error' | 'idle' | 'testing' | 'success' | 'failed';
+/**
+ * Flujo: intro (sin cámara) → popup de instrucciones → positioning (cámara
+ * encendida, centrar el rostro) → testing (gestos) → success | failed.
+ */
+type Phase = 'intro' | 'camera-error' | 'positioning' | 'testing' | 'success' | 'failed';
 
 interface Challenge {
   id: 'blink' | 'smile' | 'turn';
@@ -31,8 +35,11 @@ export class Verification implements OnInit, OnDestroy {
   private readonly photoStorage = inject(PhotoStorageService);
   private readonly videoRef = viewChild.required<ElementRef<HTMLVideoElement>>('video');
 
-  readonly phase = signal<Phase>('loading');
+  readonly phase = signal<Phase>('intro');
+  readonly modelsReady = signal(false);
   readonly faceDetected = signal(false);
+  readonly multipleFaces = signal(false);
+  readonly faceInOval = signal(false);
   readonly challenges = signal<Challenge[]>([]);
   readonly currentIndex = signal(0);
   readonly secondsLeft = signal(0);
@@ -54,8 +61,14 @@ export class Verification implements OnInit, OnDestroy {
   /** Fotografía del rostro capturada al aprobar la verificación (data URL JPEG). */
   readonly capturedPhoto = signal<string | null>(null);
 
-  /** Última posición conocida del rostro, para recortar la fotografía. */
-  private lastBox: { x: number; y: number; width: number; height: number } | null = null;
+  /** El rostro está correctamente encuadrado y es el único en escena. */
+  readonly faceOk = computed(
+    () => this.faceDetected() && !this.multipleFaces() && this.faceInOval(),
+  );
+  /** Hay un problema de encuadre que se marca en rojo. */
+  readonly faceBad = computed(
+    () => this.faceDetected() && (this.multipleFaces() || !this.faceInOval()),
+  );
 
   readonly current = computed<Challenge | null>(
     () => this.challenges()[this.currentIndex()] ?? null,
@@ -65,6 +78,17 @@ export class Verification implements OnInit, OnDestroy {
     if (list.length === 0) return 0;
     return Math.round((list.filter((c) => c.done).length / list.length) * 100);
   });
+
+  /** Mensaje de guía de encuadre (positioning y testing). */
+  readonly framingHint = computed(() => {
+    if (!this.faceDetected()) return 'No se detecta su rostro. Colóquese frente a la cámara.';
+    if (this.multipleFaces()) return 'Solo debe haber una persona frente a la cámara.';
+    if (!this.faceInOval()) return 'Centre su rostro dentro del óvalo.';
+    return '';
+  });
+
+  /** Última posición conocida del rostro, para recortar la fotografía. */
+  private lastBox: { x: number; y: number; width: number; height: number } | null = null;
 
   private stream: MediaStream | null = null;
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
@@ -77,8 +101,14 @@ export class Verification implements OnInit, OnDestroy {
   private eyesClosedConfirmed = false;
 
   private challengeDeadline = 0;
+  /** Pausa entre retos para que un gesto no contamine el siguiente. */
+  private settleUntil = 0;
+  /** Fotogramas seguidos con encuadre correcto antes de iniciar los retos. */
+  private stableFrames = 0;
 
   private static readonly CHALLENGE_SECONDS = 20;
+  private static readonly SETTLE_MS = 1500;
+  private static readonly STABLE_FRAMES_REQUIRED = 6;
   /**
    * Ojos cerrados si la apertura cae por debajo del 88 % de la referencia.
    * A distancia media la caída medida al cerrar los ojos es pequeña
@@ -97,44 +127,30 @@ export class Verification implements OnInit, OnDestroy {
   private static readonly CLOSED_FRAMES_REQUIRED = 2;
   private static readonly SMILE_MIN = 0.65;
   private static readonly YAW_MIN = 0.32;
+  /** El parpadeo solo se evalúa con la cabeza de frente (evita falsos
+   * positivos: al girar la cabeza los landmarks de los ojos se estrechan). */
+  private static readonly FRONTAL_YAW_MAX = 0.18;
+  /** Óvalo guía (coordenadas relativas al video, igual que en el CSS). */
+  private static readonly OVAL = { cx: 0.5, cy: 0.5, rx: 0.28, ry: 0.42 };
 
   async ngOnInit(): Promise<void> {
     try {
       await this.faceService.loadModels();
+      this.modelsReady.set(true);
     } catch (e) {
       this.phase.set('camera-error');
       this.failReason.set('No fue posible cargar los componentes de verificación.');
       console.error(e);
-      return;
     }
-    await this.startCamera();
   }
 
   ngOnDestroy(): void {
     this.destroyed = true;
     if (this.loopTimer) clearTimeout(this.loopTimer);
-    this.stream?.getTracks().forEach((t) => t.stop());
+    this.stopCamera();
   }
 
-  private async startCamera(): Promise<void> {
-    try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
-        audio: false,
-      });
-      const video = this.videoRef().nativeElement;
-      video.srcObject = this.stream;
-      await video.play();
-      this.phase.set('idle');
-      this.loop();
-    } catch (e) {
-      this.phase.set('camera-error');
-      this.failReason.set(
-        'No fue posible acceder a la cámara. Otorgue el permiso correspondiente y recargue la página.',
-      );
-      console.error(e);
-    }
-  }
+  // ---- flujo: popup → cámara → posicionamiento → retos ----
 
   openPrep(): void {
     this.prepSlide.set(0);
@@ -157,12 +173,49 @@ export class Verification implements OnInit, OnDestroy {
     this.prepSlide.update((i) => Math.max(0, i - 1));
   }
 
-  confirmStart(): void {
+  async confirmStart(): Promise<void> {
     this.showPrep.set(false);
-    this.startTest();
+    await this.startCamera();
   }
 
-  startTest(): void {
+  private async startCamera(): Promise<void> {
+    if (this.stream) {
+      this.beginPositioning();
+      return;
+    }
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+        audio: false,
+      });
+      const video = this.videoRef().nativeElement;
+      video.srcObject = this.stream;
+      await video.play();
+      this.beginPositioning();
+      this.loop();
+    } catch (e) {
+      this.phase.set('camera-error');
+      this.failReason.set(
+        'No fue posible acceder a la cámara. Otorgue el permiso correspondiente y recargue la página.',
+      );
+      console.error(e);
+    }
+  }
+
+  private stopCamera(): void {
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.stream = null;
+  }
+
+  private beginPositioning(): void {
+    this.stableFrames = 0;
+    this.capturedPhoto.set(null);
+    this.failReason.set('');
+    this.liveFeedback.set('');
+    this.phase.set('positioning');
+  }
+
+  private startTest(): void {
     // Orden aleatorio: impide superar la prueba con un video pregrabado.
     const pool: Challenge[] = [
       {
@@ -186,26 +239,20 @@ export class Verification implements OnInit, OnDestroy {
     ];
     this.challenges.set(pool.sort(() => Math.random() - 0.5));
     this.currentIndex.set(0);
-    this.failReason.set('');
     this.resetChallengeState();
     this.phase.set('testing');
   }
 
-  reset(): void {
-    this.phase.set('idle');
-    this.challenges.set([]);
-    this.failReason.set('');
-    this.liveFeedback.set('');
-    this.capturedPhoto.set(null);
+  /** Volver a intentar: la cámara sigue encendida, regresa al encuadre. */
+  retry(): void {
+    this.beginPositioning();
   }
 
-  downloadPhoto(): void {
-    const photo = this.capturedPhoto();
-    if (!photo) return;
-    const link = document.createElement('a');
-    link.href = photo;
-    link.download = `verificacion-rostro-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.jpg`;
-    link.click();
+  /** Terminar: apaga la cámara y vuelve a la pantalla inicial. */
+  finish(): void {
+    this.stopCamera();
+    this.challenges.set([]);
+    this.phase.set('intro');
   }
 
   private resetChallengeState(): void {
@@ -217,45 +264,74 @@ export class Verification implements OnInit, OnDestroy {
     this.secondsLeft.set(Verification.CHALLENGE_SECONDS);
   }
 
-  /** Bucle principal de análisis (~8 fotogramas por segundo). */
+  // ---- bucle principal de análisis (~8 fotogramas por segundo) ----
+
   private async loop(): Promise<void> {
-    if (this.destroyed) return;
+    if (this.destroyed || !this.stream) return;
 
     const video = this.videoRef().nativeElement;
     if (video.readyState >= 2) {
+      let faces = 0;
       let frame: LiveFrame | null = null;
       try {
-        frame = await this.faceService.analyzeFrame(video);
+        ({ faces, frame } = await this.faceService.analyzeFrame(video));
       } catch (e) {
         console.error(e);
       }
-      this.faceDetected.set(!!frame);
+      this.faceDetected.set(faces > 0);
+      this.multipleFaces.set(faces > 1);
+      this.faceInOval.set(frame ? this.isInsideOval(frame.box) : false);
       if (frame) this.lastBox = frame.box;
 
       if (this.debugMode) {
         this.debugInfo.set(
           frame
-            ? `ojos (EAR): ${frame.eyeOpenness.toFixed(3)} · referencia: ${this.baselineEyeOpenness.toFixed(3)} · ` +
+            ? `caras: ${faces} · ojos (EAR): ${frame.eyeOpenness.toFixed(3)} · referencia: ${this.baselineEyeOpenness.toFixed(3)} · ` +
                 `ratio: ${(this.baselineEyeOpenness ? frame.eyeOpenness / this.baselineEyeOpenness : 0).toFixed(2)} · ` +
-                `sonrisa: ${frame.smile.toFixed(2)} · giro: ${frame.yaw.toFixed(2)}`
+                `sonrisa: ${frame.smile.toFixed(2)} · giro: ${frame.yaw.toFixed(2)} · en óvalo: ${this.faceInOval()}`
             : 'sin rostro',
         );
       }
 
-      if (this.phase() === 'testing') {
-        this.secondsLeft.set(Math.max(0, Math.ceil((this.challengeDeadline - Date.now()) / 1000)));
-        if (Date.now() > this.challengeDeadline) {
-          this.phase.set('failed');
-          this.failReason.set(
-            'El tiempo asignado se agotó sin completar la indicación. Una fotografía o imagen estática no puede realizar estos movimientos.',
-          );
-        } else if (frame) {
-          this.evaluate(frame);
+      if (this.phase() === 'positioning') {
+        this.stableFrames = this.faceOk() ? this.stableFrames + 1 : 0;
+        if (this.stableFrames >= Verification.STABLE_FRAMES_REQUIRED) {
+          this.startTest();
         }
+      } else if (this.phase() === 'testing') {
+        this.tickTesting(frame);
       }
     }
 
     this.loopTimer = setTimeout(() => this.loop(), 120);
+  }
+
+  private tickTesting(frame: LiveFrame | null): void {
+    const now = Date.now();
+
+    // Pausa de asentamiento entre retos: no se evalúa ni corre el tiempo.
+    if (now < this.settleUntil) {
+      this.challengeDeadline = now + Verification.CHALLENGE_SECONDS * 1000;
+      return;
+    }
+
+    // Encuadre incorrecto (sin cara, varias caras o fuera del óvalo):
+    // se pausa la evaluación y el temporizador no avanza en su contra.
+    if (!frame || !this.faceOk()) {
+      this.challengeDeadline += 120;
+      return;
+    }
+
+    this.secondsLeft.set(Math.max(0, Math.ceil((this.challengeDeadline - now) / 1000)));
+    if (now > this.challengeDeadline) {
+      this.phase.set('failed');
+      this.failReason.set(
+        'El tiempo asignado se agotó sin completar la indicación. Una fotografía o imagen estática no puede realizar estos movimientos.',
+      );
+      return;
+    }
+
+    this.evaluate(frame);
   }
 
   private evaluate(frame: LiveFrame): void {
@@ -268,7 +344,11 @@ export class Verification implements OnInit, OnDestroy {
         passed = this.evaluateBlink(frame);
         break;
       case 'smile':
-        passed = frame.smile > Verification.SMILE_MIN;
+        // La sonrisa solo cuenta mirando de frente (mejor foto y sin arrastre
+        // de un giro anterior).
+        passed =
+          frame.smile > Verification.SMILE_MIN &&
+          Math.abs(frame.yaw) < Verification.FRONTAL_YAW_MAX;
         break;
       case 'turn':
         passed = Math.abs(frame.yaw) > Verification.YAW_MIN;
@@ -304,6 +384,10 @@ export class Verification implements OnInit, OnDestroy {
     } else {
       this.currentIndex.update((i) => i + 1);
       this.resetChallengeState();
+      // Pausa entre retos: el gesto anterior (p. ej. el giro) no debe
+      // contaminar la evaluación del siguiente (p. ej. el parpadeo).
+      this.settleUntil = Date.now() + Verification.SETTLE_MS;
+      this.liveFeedback.set('Correcto. Vuelva a mirar de frente…');
     }
   }
 
@@ -312,8 +396,20 @@ export class Verification implements OnInit, OnDestroy {
    * relativo a la mayor apertura observada en este reto, para adaptarse a
    * cada cámara y persona. Un cierre profundo cuenta con un solo fotograma,
    * por si la cámara entrega pocos fotogramas por segundo.
+   * Solo se evalúa con la cabeza de frente: al girar la cabeza los landmarks
+   * de los ojos se estrechan y producirían un falso parpadeo.
    */
   private evaluateBlink(frame: LiveFrame): boolean {
+    if (Math.abs(frame.yaw) > Verification.FRONTAL_YAW_MAX) {
+      this.consecutiveClosedFrames = 0;
+      this.eyesClosedConfirmed = false;
+      if (!this.liveFeedback()) this.liveFeedback.set('Mire de frente a la cámara para continuar.');
+      return false;
+    }
+    if (this.liveFeedback() === 'Mire de frente a la cámara para continuar.') {
+      this.liveFeedback.set('');
+    }
+
     this.baselineEyeOpenness = Math.max(this.baselineEyeOpenness, frame.eyeOpenness);
     if (this.baselineEyeOpenness === 0) return false;
 
@@ -324,7 +420,8 @@ export class Verification implements OnInit, OnDestroy {
       const closed = ear < Verification.CLOSED_ABSOLUTE || ratio < Verification.CLOSED_RATIO;
       if (closed) {
         this.consecutiveClosedFrames++;
-        const deepClose = ear < Verification.CLOSED_DEEP_ABSOLUTE || ratio < Verification.CLOSED_DEEP_RATIO;
+        const deepClose =
+          ear < Verification.CLOSED_DEEP_ABSOLUTE || ratio < Verification.CLOSED_DEEP_RATIO;
         if (deepClose || this.consecutiveClosedFrames >= Verification.CLOSED_FRAMES_REQUIRED) {
           this.eyesClosedConfirmed = true;
           this.liveFeedback.set('Ojos cerrados detectados. Ahora abra los ojos.');
@@ -336,5 +433,14 @@ export class Verification implements OnInit, OnDestroy {
     }
 
     return ear > Verification.REOPEN_ABSOLUTE || ratio > Verification.REOPEN_RATIO;
+  }
+
+  /** El centro del rostro debe caer dentro del óvalo guía. */
+  private isInsideOval(box: { x: number; y: number; width: number; height: number }): boolean {
+    const { cx, cy, rx, ry } = Verification.OVAL;
+    const faceCx = box.x + box.width / 2;
+    const faceCy = box.y + box.height / 2;
+    const value = ((faceCx - cx) / rx) ** 2 + ((faceCy - cy) / ry) ** 2;
+    return value <= 1;
   }
 }

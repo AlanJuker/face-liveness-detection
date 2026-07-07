@@ -8,71 +8,90 @@
       </p>
     </div>
 
-    <div class="video-wrap" [class.face-on]="faceDetected()">
-      <video #video autoplay muted playsinline></video>
-
-      <span class="corner tl"></span>
-      <span class="corner tr"></span>
-      <span class="corner bl"></span>
-      <span class="corner br"></span>
-
-      <div class="oval-guide"></div>
-
-      @if (faceDetected() && (phase() === 'idle' || phase() === 'testing')) {
-        <div class="scan-area">
-          <div class="scan-line"></div>
+    @if (phase() === 'intro') {
+      <div class="intro">
+        <div class="intro-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="6" width="14" height="12" rx="2" />
+            <path d="M17 10.5 21 8v8l-4-2.5" stroke-linejoin="round" />
+          </svg>
         </div>
-      }
-
-      @if (phase() === 'loading') {
-        <div class="veil">
-          <span class="spinner"></span>
-          <p>Iniciando la verificación…</p>
-        </div>
-      }
-      @if (phase() === 'camera-error') {
-        <div class="veil">
-          <p class="verdict">Cámara no disponible</p>
-          <p class="reason">{{ failReason() }}</p>
-        </div>
-      }
-      @if (phase() === 'success') {
-        <div class="veil success-veil">
-          <span class="result-icon ok-icon">✓</span>
-          <p class="verdict">Verificación exitosa</p>
-          <p class="reason">Se confirmó la presencia de una persona real.</p>
-        </div>
-      }
-      @if (phase() === 'failed') {
-        <div class="veil fail-veil">
-          <span class="result-icon fail-icon">✕</span>
-          <p class="verdict">Verificación no superada</p>
-          <p class="reason">{{ failReason() }}</p>
-        </div>
-      }
-
-      @if (debugMode) {
-        <div class="debug-bar">{{ debugInfo() }}</div>
-      }
-    </div>
-
-    @if (phase() === 'idle') {
-      <section class="panel">
-        <p class="hint" [class.ok]="faceDetected()">
-          {{
-            faceDetected()
-              ? 'Rostro detectado correctamente. Puede iniciar la verificación.'
-              : 'Esperando a detectar su rostro dentro del área señalada…'
-          }}
+        <p class="intro-text">
+          La verificación toma menos de un minuto. Antes de encender la cámara le mostraremos
+          algunas indicaciones para que el proceso sea exitoso.
         </p>
-        <button class="primary" (click)="openPrep()" [disabled]="!faceDetected()">
-          Iniciar verificación
+        <button class="primary" (click)="openPrep()" [disabled]="!modelsReady()">
+          {{ modelsReady() ? 'Iniciar verificación' : 'Preparando…' }}
         </button>
         <p class="privacy">
           Aviso de privacidad: el análisis de gestos se realiza únicamente en su dispositivo. Al
           aprobar la verificación se almacenará una fotografía de su rostro como evidencia del
           trámite.
         </p>
+      </div>
+    }
+
+    <div
+      class="video-wrap"
+      [class.hidden]="phase() === 'intro'"
+      [class.face-on]="faceOk()"
+      [class.face-bad]="faceBad()"
+    >
+        <video #video autoplay muted playsinline></video>
+
+        <span class="corner tl"></span>
+        <span class="corner tr"></span>
+        <span class="corner bl"></span>
+        <span class="corner br"></span>
+
+        <div class="oval-guide"></div>
+
+        @if (faceOk() && (phase() === 'positioning' || phase() === 'testing')) {
+          <div class="scan-area">
+            <div class="scan-line"></div>
+          </div>
+        }
+
+        @if ((phase() === 'positioning' || phase() === 'testing') && framingHint()) {
+          <div class="framing-bar">{{ framingHint() }}</div>
+        }
+
+        @if (phase() === 'camera-error') {
+          <div class="veil">
+            <p class="verdict">Cámara no disponible</p>
+            <p class="reason">{{ failReason() }}</p>
+          </div>
+        }
+        @if (phase() === 'success') {
+          <div class="veil success-veil">
+            <span class="result-icon ok-icon">✓</span>
+            <p class="verdict">Verificación exitosa</p>
+            <p class="reason">Se confirmó la presencia de una persona real.</p>
+          </div>
+        }
+        @if (phase() === 'failed') {
+          <div class="veil fail-veil">
+            <span class="result-icon fail-icon">✕</span>
+            <p class="verdict">Verificación no superada</p>
+            <p class="reason">{{ failReason() }}</p>
+          </div>
+        }
+
+        @if (debugMode) {
+          <div class="debug-bar">{{ debugInfo() }}</div>
+        }
+      </div>
+
+    @if (phase() === 'positioning') {
+      <section class="panel">
+        <p class="hint" [class.ok]="faceOk()">
+          {{
+            faceOk()
+              ? 'Encuadre correcto. La verificación comenzará en un instante…'
+              : 'Coloque su rostro dentro del óvalo para comenzar.'
+          }}
+        </p>
+        <button class="secondary" (click)="finish()">Cancelar</button>
       </section>
     }
 
@@ -105,12 +124,6 @@
         </div>
 
         <div class="progress"><div class="bar" [style.width.%]="progress()"></div></div>
-
-        @if (!faceDetected()) {
-          <p class="hint warn">
-            No se detecta su rostro. Colóquese de frente a la cámara, dentro del área señalada.
-          </p>
-        }
       </section>
     }
 
@@ -125,23 +138,21 @@
                   Se capturó y almacenó una fotografía de su rostro como evidencia de la
                   verificación.
                 </p>
-                <button class="secondary" (click)="downloadPhoto()">Descargar fotografía</button>
               </div>
             </div>
           }
           <p class="hint ok">Puede continuar con su trámite de cambio de domicilio.</p>
+          <button class="primary" (click)="finish()">Finalizar</button>
         } @else {
           <p class="hint">
             Verifique la iluminación y que su rostro sea visible; después inténtelo nuevamente.
           </p>
+          <button class="primary" (click)="retry()">Intentar nuevamente</button>
+          <button class="secondary" (click)="finish()">Cancelar</button>
         }
-        <button class="primary" (click)="reset()">
-          {{ phase() === 'success' ? 'Realizar una nueva verificación' : 'Intentar nuevamente' }}
-        </button>
       </section>
     }
   </div>
-
 </main>
 
 @if (showPrep()) {
@@ -204,7 +215,7 @@
             <p>Sitúese en un lugar bien iluminado, evitando luz directa a su espalda.</p>
           </div>
 
-          <!-- Lámina 3: encuadre del rostro -->
+          <!-- Lámina 3: encuadre del rostro, una sola persona -->
           <div class="slide">
             <div class="illustration">
               <svg viewBox="0 0 200 150">
@@ -219,8 +230,11 @@
                 <line x1="60" y1="30" x2="140" y2="30" class="ill-scan" />
               </svg>
             </div>
-            <h3>Mire de frente a la cámara</h3>
-            <p>Mantenga su rostro dentro del área señalada durante toda la verificación.</p>
+            <h3>Solo usted, mirando de frente</h3>
+            <p>
+              Mantenga su rostro dentro del óvalo y asegúrese de ser la única persona frente a la
+              cámara.
+            </p>
           </div>
 
           <!-- Lámina 4: los tres gestos -->
@@ -244,7 +258,10 @@
               </svg>
             </div>
             <h3>Realice tres gestos sencillos</h3>
-            <p>Se le pedirá parpadear, sonreír y girar la cabeza. Tendrá 20 segundos para cada gesto.</p>
+            <p>
+              Se le pedirá parpadear, sonreír y girar la cabeza. Tendrá 20 segundos para cada
+              gesto. Al terminar, la cámara se encenderá.
+            </p>
           </div>
         </div>
       </div>
@@ -262,7 +279,7 @@
           <button class="secondary" (click)="cancelPrep()">Cancelar</button>
         }
         <button class="primary" (click)="nextSlide()">
-          {{ prepSlide() === prepSlides.length - 1 ? 'Comenzar verificación' : 'Siguiente' }}
+          {{ prepSlide() === prepSlides.length - 1 ? 'Entendido, encender cámara' : 'Siguiente' }}
         </button>
       </div>
     </div>

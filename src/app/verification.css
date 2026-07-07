@@ -63,6 +63,10 @@ h2 {
 
 /* ---- cámara ---- */
 
+.video-wrap.hidden {
+  display: none;
+}
+
 .video-wrap {
   position: relative;
   width: 100%;
@@ -130,6 +134,10 @@ video {
   border-color: #6ea8f0;
 }
 
+.face-bad .corner {
+  border-color: #e05a3f;
+}
+
 /* guía ovalada */
 
 .oval-guide {
@@ -151,6 +159,16 @@ video {
   border-color: #6ea8f0;
   box-shadow: 0 0 18px rgb(110 168 240 / 0.55), inset 0 0 22px rgb(110 168 240 / 0.18);
   animation: guide-pulse 2.4s ease-in-out infinite;
+}
+
+/* rostro detectado pero mal encuadrado (fuera del óvalo o más de una cara):
+   toda la guía se marca en rojo */
+
+.face-bad .oval-guide {
+  border-style: solid;
+  border-color: #e05a3f;
+  box-shadow: 0 0 18px rgb(224 90 63 / 0.55), inset 0 0 26px rgb(224 90 63 / 0.22),
+    0 0 0 4000px rgb(120 30 15 / 0.28);
 }
 
 @keyframes guide-pulse {
@@ -202,6 +220,61 @@ video {
   50% {
     top: calc(100% + 0px);
   }
+}
+
+/* barra de aviso de encuadre sobre el video */
+
+.framing-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 2;
+  background: rgb(120 30 15 / 0.92);
+  color: #ffffff;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 0.5rem 1.1rem;
+  width: max-content;
+  max-width: 92%;
+  text-align: center;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.3);
+}
+
+/* ---- pantalla inicial (sin cámara) ---- */
+
+.intro {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.5rem 0.5rem;
+  text-align: center;
+}
+
+.intro-icon {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: var(--blue-soft);
+  color: var(--blue);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.intro-icon svg {
+  width: 38px;
+  height: 38px;
+}
+
+.intro-text {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  max-width: 46ch;
 }
 
 /* ---- velos de estado ---- */
@@ -351,6 +424,12 @@ button.secondary {
 
 button.secondary:hover {
   background: var(--blue-soft);
+}
+
+.panel button.secondary {
+  align-self: center;
+  width: 100%;
+  max-width: 380px;
 }
 
 /* ---- prueba en curso ---- */

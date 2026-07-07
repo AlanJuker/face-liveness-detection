@@ -32,35 +32,43 @@ export class FaceRecognitionService {
   }
 
   /**
-   * Analiza el fotograma actual: devuelve métricas de vida (ojos, sonrisa,
-   * giro de cabeza) o null si no hay rostro.
+   * Analiza el fotograma actual detectando TODAS las caras presentes.
+   * Devuelve cuántas hay y las métricas de vida (ojos, sonrisa, giro) de la
+   * cara principal (la de mayor tamaño), o frame null si no hay ninguna.
    */
-  async analyzeFrame(video: HTMLVideoElement): Promise<LiveFrame | null> {
-    const result = await faceapi
-      .detectSingleFace(
+  async analyzeFrame(video: HTMLVideoElement): Promise<{ faces: number; frame: LiveFrame | null }> {
+    const results = await faceapi
+      .detectAllFaces(
         video,
         new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 }),
       )
       .withFaceLandmarks()
       .withFaceExpressions();
 
-    if (!result) return null;
+    if (results.length === 0) return { faces: 0, frame: null };
 
-    const landmarks = result.landmarks;
+    const primary = results.reduce((a, b) =>
+      a.detection.box.area >= b.detection.box.area ? a : b,
+    );
+
+    const landmarks = primary.landmarks;
     const eyeOpenness =
       (this.eyeAspectRatio(landmarks.getLeftEye()) +
         this.eyeAspectRatio(landmarks.getRightEye())) /
       2;
 
-    const box = result.detection.box;
+    const box = primary.detection.box;
     const vw = video.videoWidth || 1;
     const vh = video.videoHeight || 1;
 
     return {
-      eyeOpenness,
-      smile: result.expressions.happy,
-      yaw: this.headYaw(landmarks),
-      box: { x: box.x / vw, y: box.y / vh, width: box.width / vw, height: box.height / vh },
+      faces: results.length,
+      frame: {
+        eyeOpenness,
+        smile: primary.expressions.happy,
+        yaw: this.headYaw(landmarks),
+        box: { x: box.x / vw, y: box.y / vh, width: box.width / vw, height: box.height / vh },
+      },
     };
   }
 
