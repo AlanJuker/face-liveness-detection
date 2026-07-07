@@ -1,0 +1,26 @@
+server {
+    listen ${PORT};
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    # Los pesos de los modelos de IA no cambian: caché larga
+    location /models/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+
+    # Bundles con hash en el nombre: caché larga
+    location ~* \.(js|css)$ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+
+    # SPA: cualquier ruta desconocida sirve index.html
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

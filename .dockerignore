@@ -1,0 +1,9 @@
+node_modules
+dist
+.angular
+.git
+.vscode
+Dockerfile
+.dockerignore
+railway.json
+README.md
