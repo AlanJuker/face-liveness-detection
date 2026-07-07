@@ -104,7 +104,7 @@ h1 {
   flex: 1;
 }
 
-button.secondary {
+.secondary {
   padding: 0.45rem 0.6rem;
   border: 1px solid var(--blue-line);
   border-radius: 6px;
@@ -114,10 +114,19 @@ button.secondary {
   background: #ffffff;
   cursor: pointer;
   transition: background 0.15s;
+  text-align: center;
+  text-decoration: none;
 }
 
-button.secondary:hover {
+.secondary:hover {
   background: var(--blue-soft);
+}
+
+.error {
+  margin: 0;
+  color: var(--danger);
+  font-weight: 600;
+  font-size: 0.92rem;
 }
 
 button.danger {

@@ -2,76 +2,59 @@ import { Injectable } from '@angular/core';
 
 export interface StoredPhoto {
   id: number;
-  dataUrl: string;
   createdAt: string;
+  bytes: number;
+  /** URL para mostrar la imagen (mismo origen). */
+  url: string;
+  /** URL que fuerza la descarga del archivo. */
+  downloadUrl: string;
+}
+
+export interface PhotoListing {
+  photos: StoredPhoto[];
+  totalBytes: number;
 }
 
 /**
- * Almacena las fotografías de evidencia en IndexedDB (base de datos local del
- * navegador). Los datos nunca salen del dispositivo; la página /fotos permite
- * descargarlas o eliminarlas para liberar espacio.
+ * Cliente de la API de fotografías de evidencia. Las fotos se guardan en el
+ * servidor (PostgreSQL en Railway), por lo que pueden consultarse y eliminarse
+ * desde cualquier navegador en la página /fotos.
  */
 @Injectable({ providedIn: 'root' })
 export class PhotoStorageService {
-  private static readonly DB_NAME = 'liveness-photos';
-  private static readonly STORE = 'photos';
+  private static readonly API = '/api/photos';
 
-  private open(): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open(PhotoStorageService.DB_NAME, 1);
-      request.onupgradeneeded = () => {
-        if (!request.result.objectStoreNames.contains(PhotoStorageService.STORE)) {
-          request.result.createObjectStore(PhotoStorageService.STORE, {
-            keyPath: 'id',
-            autoIncrement: true,
-          });
-        }
-      };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+  async save(dataUrl: string): Promise<void> {
+    const response = await fetch(PhotoStorageService.API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dataUrl }),
     });
+    if (!response.ok) throw new Error(`Error al guardar la fotografía (${response.status})`);
   }
 
-  private async run<T>(
-    mode: IDBTransactionMode,
-    action: (store: IDBObjectStore) => IDBRequest,
-  ): Promise<T> {
-    const db = await this.open();
-    try {
-      return await new Promise<T>((resolve, reject) => {
-        const request = action(db.transaction(PhotoStorageService.STORE, mode).objectStore(PhotoStorageService.STORE));
-        request.onsuccess = () => resolve(request.result as T);
-        request.onerror = () => reject(request.error);
-      });
-    } finally {
-      db.close();
-    }
+  async list(): Promise<PhotoListing> {
+    const response = await fetch(PhotoStorageService.API);
+    if (!response.ok) throw new Error(`Error al listar las fotografías (${response.status})`);
+    const body: { photos: { id: number; createdAt: string; bytes: number }[]; totalBytes: number } =
+      await response.json();
+    return {
+      totalBytes: body.totalBytes,
+      photos: body.photos.map((p) => ({
+        ...p,
+        url: `${PhotoStorageService.API}/${p.id}`,
+        downloadUrl: `${PhotoStorageService.API}/${p.id}?download`,
+      })),
+    };
   }
 
-  save(dataUrl: string): Promise<number> {
-    return this.run('readwrite', (store) =>
-      store.add({ dataUrl, createdAt: new Date().toISOString() }),
-    );
+  async remove(id: number): Promise<void> {
+    const response = await fetch(`${PhotoStorageService.API}/${id}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error(`Error al eliminar la fotografía (${response.status})`);
   }
 
-  list(): Promise<StoredPhoto[]> {
-    return this.run('readonly', (store) => store.getAll());
-  }
-
-  remove(id: number): Promise<void> {
-    return this.run('readwrite', (store) => store.delete(id));
-  }
-
-  clear(): Promise<void> {
-    return this.run('readwrite', (store) => store.clear());
-  }
-
-  /** Espacio ocupado por el origen (aproximado), en bytes. */
-  async usedBytes(): Promise<number> {
-    if (navigator.storage?.estimate) {
-      const estimate = await navigator.storage.estimate();
-      return estimate.usage ?? 0;
-    }
-    return 0;
+  async clear(): Promise<void> {
+    const response = await fetch(PhotoStorageService.API, { method: 'DELETE' });
+    if (!response.ok) throw new Error(`Error al eliminar las fotografías (${response.status})`);
   }
 }

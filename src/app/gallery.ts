@@ -14,6 +14,7 @@ export class Gallery implements OnInit {
   readonly photos = signal<StoredPhoto[]>([]);
   readonly usedBytes = signal(0);
   readonly loading = signal(true);
+  readonly error = signal('');
 
   readonly usedLabel = computed(() => {
     const bytes = this.usedBytes();
@@ -27,34 +28,39 @@ export class Gallery implements OnInit {
   }
 
   private async refresh(): Promise<void> {
+    this.error.set('');
     try {
-      const photos = await this.storage.list();
-      this.photos.set(photos.sort((a, b) => b.id - a.id));
-      this.usedBytes.set(await this.storage.usedBytes());
+      const listing = await this.storage.list();
+      this.photos.set(listing.photos);
+      this.usedBytes.set(listing.totalBytes);
     } catch (e) {
       console.error(e);
+      this.error.set('No se pudieron cargar las fotografías. Intente nuevamente.');
     } finally {
       this.loading.set(false);
     }
   }
 
-  download(photo: StoredPhoto): void {
-    const link = document.createElement('a');
-    link.href = photo.dataUrl;
-    link.download = `verificacion-rostro-${photo.createdAt.slice(0, 19).replace(/[T:]/g, '-')}.jpg`;
-    link.click();
-  }
-
   async remove(photo: StoredPhoto): Promise<void> {
-    await this.storage.remove(photo.id);
-    await this.refresh();
+    try {
+      await this.storage.remove(photo.id);
+      await this.refresh();
+    } catch (e) {
+      console.error(e);
+      this.error.set('No se pudo eliminar la fotografía.');
+    }
   }
 
   async removeAll(): Promise<void> {
     if (!confirm('¿Eliminar todas las fotografías almacenadas? Esta acción no se puede deshacer.')) {
       return;
     }
-    await this.storage.clear();
-    await this.refresh();
+    try {
+      await this.storage.clear();
+      await this.refresh();
+    } catch (e) {
+      console.error(e);
+      this.error.set('No se pudieron eliminar las fotografías.');
+    }
   }
 }
