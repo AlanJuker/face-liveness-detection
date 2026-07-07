@@ -52,6 +52,15 @@
           </div>
         }
 
+        @if (phase() === 'testing' && current(); as c) {
+          <div class="instruction-overlay" [class.feedback-mode]="!!liveFeedback()">
+            {{ liveFeedback() || c.instruction }}
+          </div>
+        }
+        @if (phase() === 'positioning' && faceOk()) {
+          <div class="instruction-overlay">La verificación comenzará en un instante…</div>
+        }
+
         @if ((phase() === 'positioning' || phase() === 'testing') && framingHint()) {
           <div class="framing-bar">{{ framingHint() }}</div>
         }

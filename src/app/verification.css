@@ -222,6 +222,32 @@ video {
   }
 }
 
+/* rótulo principal de instrucciones, arriba del video, siempre legible */
+
+.instruction-overlay {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  background: rgb(255 255 255 / 0.96);
+  color: var(--blue-dark);
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.4;
+  border-radius: 10px;
+  padding: 0.65rem 1.15rem;
+  width: max-content;
+  max-width: 92%;
+  text-align: center;
+  box-shadow: 0 6px 22px rgb(0 0 0 / 0.35);
+}
+
+.instruction-overlay.feedback-mode {
+  background: var(--blue-dark);
+  color: #ffffff;
+}
+
 /* barra de aviso de encuadre sobre el video */
 
 .framing-bar {

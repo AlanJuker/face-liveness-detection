@@ -143,10 +143,13 @@ export class Verification implements OnInit, OnDestroy {
   private static readonly NEUTRAL_MAX = 0.3;
   private static readonly YAW_MIN = 0.32;
   /** Movimiento máximo entre fotogramas para considerar la cabeza quieta
-   * (mover o inclinar un teléfono con una foto desplaza toda la imagen). */
-  private static readonly STILL_CENTER_DELTA = 0.03;
-  private static readonly STILL_WIDTH_DELTA = 0.035;
-  private static readonly STILL_YAW_DELTA = 0.09;
+   * (mover o inclinar un teléfono con una foto desplaza toda la imagen).
+   * Tolerante al micro-movimiento natural y al jitter del detector. */
+  private static readonly STILL_CENTER_DELTA = 0.05;
+  private static readonly STILL_WIDTH_DELTA = 0.05;
+  private static readonly STILL_YAW_DELTA = 0.14;
+  /** Para completar el giro basta volver aproximadamente al centro. */
+  private static readonly RETURN_YAW_MAX = 0.22;
   /** Si el rostro desaparece más de este tiempo durante la prueba, falla. */
   private static readonly ABSENCE_LIMIT_MS = 3000;
   /** El parpadeo solo se evalúa con la cabeza de frente (evita falsos
@@ -469,11 +472,12 @@ export class Verification implements OnInit, OnDestroy {
       if (!this.liveFeedback()) this.liveFeedback.set('Mire de frente a la cámara para continuar.');
       return false;
     }
-    // La cabeza (y la cámara) deben estar quietas: inclinar o mover un
-    // teléfono con una foto desplaza toda la imagen y simula un parpadeo.
-    if (!this.isStill(frame)) {
+    // La cabeza (y la cámara) deben estar quietas mientras se detecta el
+    // cierre de ojos: inclinar o mover un teléfono con una foto desplaza toda
+    // la imagen y simula un parpadeo. Una vez confirmado el cierre, el
+    // movimiento leve al reabrir no penaliza.
+    if (!this.eyesClosedConfirmed && !this.isStill(frame)) {
       this.consecutiveClosedFrames = 0;
-      this.eyesClosedConfirmed = false;
       if (!this.liveFeedback()) {
         this.liveFeedback.set('Mantenga la cabeza quieta y parpadee.');
       }
@@ -520,9 +524,9 @@ export class Verification implements OnInit, OnDestroy {
     const frontal = Math.abs(frame.yaw) < Verification.FRONTAL_YAW_MAX;
 
     if (!this.neutralSeen) {
-      if (frontal && frame.smile < Verification.NEUTRAL_MAX && this.isStill(frame)) {
+      if (frontal && frame.smile < Verification.NEUTRAL_MAX) {
         this.neutralFrames++;
-        if (this.neutralFrames >= 3) {
+        if (this.neutralFrames >= 2) {
           this.neutralSeen = true;
           this.liveFeedback.set('Perfecto. Ahora sonría ampliamente.');
         }
@@ -547,16 +551,16 @@ export class Verification implements OnInit, OnDestroy {
     const frontal = Math.abs(frame.yaw) < Verification.FRONTAL_YAW_MAX;
 
     if (!this.frontalSeen) {
-      if (frontal && this.isStill(frame)) {
+      if (frontal) {
         this.frontalFrames++;
-        if (this.frontalFrames >= 3) {
+        if (this.frontalFrames >= 2) {
           this.frontalSeen = true;
           this.liveFeedback.set('Ahora gire la cabeza hacia un lado.');
         }
       } else {
         this.frontalFrames = 0;
         if (!this.liveFeedback()) {
-          this.liveFeedback.set('Mire de frente a la cámara y manténgase quieto un momento.');
+          this.liveFeedback.set('Mire de frente a la cámara un momento.');
         }
       }
       return false;
@@ -570,7 +574,7 @@ export class Verification implements OnInit, OnDestroy {
       return false;
     }
 
-    return frontal;
+    return Math.abs(frame.yaw) < Verification.RETURN_YAW_MAX;
   }
 
   /** El centro del rostro debe caer dentro del óvalo guía. */
