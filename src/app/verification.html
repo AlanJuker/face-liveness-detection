@@ -1,0 +1,269 @@
+<main class="page">
+  <div class="card">
+    <div class="card-head">
+      <h1>Prueba de vida</h1>
+      <p class="subtitle">
+        Como parte de su trámite, es necesario confirmar que la solicitud la realiza una persona
+        presente frente a la cámara y no una fotografía o grabación.
+      </p>
+    </div>
+
+    <div class="video-wrap" [class.face-on]="faceDetected()">
+      <video #video autoplay muted playsinline></video>
+
+      <span class="corner tl"></span>
+      <span class="corner tr"></span>
+      <span class="corner bl"></span>
+      <span class="corner br"></span>
+
+      <div class="oval-guide"></div>
+
+      @if (faceDetected() && (phase() === 'idle' || phase() === 'testing')) {
+        <div class="scan-area">
+          <div class="scan-line"></div>
+        </div>
+      }
+
+      @if (phase() === 'loading') {
+        <div class="veil">
+          <span class="spinner"></span>
+          <p>Iniciando la verificación…</p>
+        </div>
+      }
+      @if (phase() === 'camera-error') {
+        <div class="veil">
+          <p class="verdict">Cámara no disponible</p>
+          <p class="reason">{{ failReason() }}</p>
+        </div>
+      }
+      @if (phase() === 'success') {
+        <div class="veil success-veil">
+          <span class="result-icon ok-icon">✓</span>
+          <p class="verdict">Verificación exitosa</p>
+          <p class="reason">Se confirmó la presencia de una persona real.</p>
+        </div>
+      }
+      @if (phase() === 'failed') {
+        <div class="veil fail-veil">
+          <span class="result-icon fail-icon">✕</span>
+          <p class="verdict">Verificación no superada</p>
+          <p class="reason">{{ failReason() }}</p>
+        </div>
+      }
+
+      @if (debugMode) {
+        <div class="debug-bar">{{ debugInfo() }}</div>
+      }
+    </div>
+
+    @if (phase() === 'idle') {
+      <section class="panel">
+        <p class="hint" [class.ok]="faceDetected()">
+          {{
+            faceDetected()
+              ? 'Rostro detectado correctamente. Puede iniciar la verificación.'
+              : 'Esperando a detectar su rostro dentro del área señalada…'
+          }}
+        </p>
+        <button class="primary" (click)="openPrep()" [disabled]="!faceDetected()">
+          Iniciar verificación
+        </button>
+        <p class="privacy">
+          Aviso de privacidad: el análisis se realiza únicamente en su dispositivo. Ninguna imagen
+          es transmitida ni almacenada.
+        </p>
+      </section>
+    }
+
+    @if (phase() === 'testing') {
+      <section class="panel">
+        <div class="step-header">
+          <span class="step-count">Paso {{ currentIndex() + 1 }} de {{ challenges().length }}</span>
+          <span class="timer" [class.low]="secondsLeft() <= 5">{{ secondsLeft() }} s</span>
+        </div>
+
+        @if (current(); as c) {
+          <h2 class="step-title">{{ c.title }}</h2>
+          <p class="instruction">{{ c.instruction }}</p>
+          @if (liveFeedback()) {
+            <p class="feedback">{{ liveFeedback() }}</p>
+          }
+        }
+
+        <div class="steps">
+          @for (c of challenges(); track c.id; let i = $index) {
+            <div
+              class="step"
+              [class.done]="c.done"
+              [class.active]="i === currentIndex() && !c.done"
+            >
+              <span class="step-dot">{{ c.done ? '✓' : i + 1 }}</span>
+              <span>{{ c.title }}</span>
+            </div>
+          }
+        </div>
+
+        <div class="progress"><div class="bar" [style.width.%]="progress()"></div></div>
+
+        @if (!faceDetected()) {
+          <p class="hint warn">
+            No se detecta su rostro. Colóquese de frente a la cámara, dentro del área señalada.
+          </p>
+        }
+      </section>
+    }
+
+    @if (phase() === 'success' || phase() === 'failed') {
+      <section class="panel">
+        @if (phase() === 'success') {
+          @if (capturedPhoto(); as photo) {
+            <div class="snapshot">
+              <img [src]="photo" alt="Fotografía capturada durante la verificación" />
+              <div class="snapshot-info">
+                <p>
+                  Se capturó una fotografía de su rostro como evidencia de la verificación. La
+                  imagen permanece en su dispositivo.
+                </p>
+                <button class="secondary" (click)="downloadPhoto()">Descargar fotografía</button>
+              </div>
+            </div>
+          }
+          <p class="hint ok">Puede continuar con su trámite de cambio de domicilio.</p>
+        } @else {
+          <p class="hint">
+            Verifique la iluminación y que su rostro sea visible; después inténtelo nuevamente.
+          </p>
+        }
+        <button class="primary" (click)="reset()">
+          {{ phase() === 'success' ? 'Realizar una nueva verificación' : 'Intentar nuevamente' }}
+        </button>
+      </section>
+    }
+  </div>
+
+</main>
+
+@if (showPrep()) {
+  <div class="modal-backdrop" (click)="cancelPrep()">
+    <div class="modal carousel-modal" role="dialog" aria-modal="true" (click)="$event.stopPropagation()">
+      <button class="modal-close" (click)="cancelPrep()" aria-label="Cerrar">✕</button>
+      <h2>Antes de comenzar</h2>
+
+      <div class="carousel">
+        <div class="carousel-track" [style.transform]="'translateX(-' + prepSlide() * 100 + '%)'">
+          <!-- Lámina 1: retirar accesorios -->
+          <div class="slide">
+            <div class="illustration">
+              <svg viewBox="0 0 200 150">
+                <circle cx="100" cy="82" r="44" class="ill-head" />
+                <path d="M78 100 Q100 114 122 100" class="ill-mouth" />
+                <circle cx="84" cy="76" r="4" class="ill-eye" />
+                <circle cx="116" cy="76" r="4" class="ill-eye" />
+                <g class="ill-glasses">
+                  <circle cx="84" cy="76" r="14" />
+                  <circle cx="116" cy="76" r="14" />
+                  <line x1="98" y1="76" x2="102" y2="76" />
+                  <line x1="70" y1="74" x2="58" y2="70" />
+                  <line x1="130" y1="74" x2="142" y2="70" />
+                </g>
+                <g class="ill-cap">
+                  <path d="M64 52 Q100 20 136 52 L136 58 Q100 42 64 58 Z" />
+                  <path d="M128 50 Q152 50 156 60 L134 62 Z" />
+                </g>
+              </svg>
+            </div>
+            <h3>Retire sus accesorios</h3>
+            <p>Quítese lentes, gorra, cubrebocas o cualquier objeto que cubra su rostro.</p>
+          </div>
+
+          <!-- Lámina 2: iluminación -->
+          <div class="slide">
+            <div class="illustration">
+              <svg viewBox="0 0 200 150">
+                <g class="ill-sun">
+                  <circle cx="100" cy="34" r="14" />
+                  <g class="ill-rays">
+                    <line x1="100" y1="8" x2="100" y2="16" />
+                    <line x1="100" y1="52" x2="100" y2="60" />
+                    <line x1="74" y1="34" x2="66" y2="34" />
+                    <line x1="126" y1="34" x2="134" y2="34" />
+                    <line x1="82" y1="16" x2="76" y2="10" />
+                    <line x1="118" y1="16" x2="124" y2="10" />
+                    <line x1="82" y1="52" x2="76" y2="58" />
+                    <line x1="118" y1="52" x2="124" y2="58" />
+                  </g>
+                </g>
+                <circle cx="100" cy="102" r="36" class="ill-head ill-head-lit" />
+                <path d="M82 116 Q100 128 118 116" class="ill-mouth" />
+                <circle cx="87" cy="97" r="3.5" class="ill-eye" />
+                <circle cx="113" cy="97" r="3.5" class="ill-eye" />
+              </svg>
+            </div>
+            <h3>Busque buena iluminación</h3>
+            <p>Sitúese en un lugar bien iluminado, evitando luz directa a su espalda.</p>
+          </div>
+
+          <!-- Lámina 3: encuadre del rostro -->
+          <div class="slide">
+            <div class="illustration">
+              <svg viewBox="0 0 200 150">
+                <rect x="46" y="8" width="108" height="134" rx="10" class="ill-frame" />
+                <ellipse cx="100" cy="75" rx="34" ry="46" class="ill-oval" />
+                <g class="ill-face-center">
+                  <circle cx="100" cy="72" r="26" class="ill-head" />
+                  <path d="M88 82 Q100 90 112 82" class="ill-mouth" />
+                  <circle cx="91" cy="68" r="3" class="ill-eye" />
+                  <circle cx="109" cy="68" r="3" class="ill-eye" />
+                </g>
+                <line x1="60" y1="30" x2="140" y2="30" class="ill-scan" />
+              </svg>
+            </div>
+            <h3>Mire de frente a la cámara</h3>
+            <p>Mantenga su rostro dentro del área señalada durante toda la verificación.</p>
+          </div>
+
+          <!-- Lámina 4: los tres gestos -->
+          <div class="slide">
+            <div class="illustration">
+              <svg viewBox="0 0 200 150">
+                <g class="ill-gesture-head">
+                  <circle cx="100" cy="78" r="42" class="ill-head" />
+                  <g class="ill-features">
+                    <g class="ill-blink-eyes">
+                      <circle cx="85" cy="72" r="4" class="ill-eye" />
+                      <circle cx="115" cy="72" r="4" class="ill-eye" />
+                      <line x1="78" y1="72" x2="92" y2="72" class="ill-eyelid" />
+                      <line x1="108" y1="72" x2="122" y2="72" class="ill-eyelid" />
+                    </g>
+                    <path d="M100 80 Q104 86 100 88" class="ill-nose" />
+                    <path d="M82 98 L118 98" class="ill-mouth ill-mouth-neutral" />
+                    <path d="M80 96 Q100 112 120 96" class="ill-mouth ill-mouth-smile" />
+                  </g>
+                </g>
+              </svg>
+            </div>
+            <h3>Realice tres gestos sencillos</h3>
+            <p>Se le pedirá parpadear, sonreír y girar la cabeza. Tendrá 20 segundos para cada gesto.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="carousel-dots">
+        @for (i of prepSlides; track i) {
+          <span class="dot" [class.active]="i === prepSlide()"></span>
+        }
+      </div>
+
+      <div class="modal-actions carousel-actions">
+        @if (prepSlide() > 0) {
+          <button class="secondary" (click)="prevSlide()">Atrás</button>
+        } @else {
+          <button class="secondary" (click)="cancelPrep()">Cancelar</button>
+        }
+        <button class="primary" (click)="nextSlide()">
+          {{ prepSlide() === prepSlides.length - 1 ? 'Comenzar verificación' : 'Siguiente' }}
+        </button>
+      </div>
+    </div>
+  </div>
+}

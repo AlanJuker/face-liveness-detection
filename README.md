@@ -25,6 +25,10 @@ no backend.
 - **Evidence photo**: captured while the user smiles, cropped to the face,
   mirrored back to natural orientation, downloadable as JPEG and available in
   code (`capturedPhoto` signal) for backend integration.
+- **Photo gallery** (`/fotos` route): every evidence photo is stored locally in
+  the browser's IndexedDB. The gallery page lists them with capture date and
+  storage usage, and lets you download or delete them (individually or all at
+  once) to free up space. No server or external database is involved.
 - **Institutional UI**: formal Spanish copy, blue/white palette, responsive
   layout.
 
