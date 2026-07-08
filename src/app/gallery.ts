@@ -2,6 +2,8 @@ import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { PhotoStorageService, StoredPhoto } from './photo-storage.service';
 
+type PendingDelete = { kind: 'one'; photo: StoredPhoto } | { kind: 'all' };
+
 @Component({
   selector: 'app-gallery',
   imports: [DatePipe],
@@ -15,6 +17,10 @@ export class Gallery implements OnInit {
   readonly usedBytes = signal(0);
   readonly loading = signal(true);
   readonly error = signal('');
+  /** Confirmación pendiente de borrado (una foto o todas). */
+  readonly pendingDelete = signal<PendingDelete | null>(null);
+  /** Ids con eliminación en curso, para deshabilitar sus botones. */
+  readonly deleting = signal(false);
 
   readonly usedLabel = computed(() => {
     const bytes = this.usedBytes();
@@ -41,26 +47,36 @@ export class Gallery implements OnInit {
     }
   }
 
-  async remove(photo: StoredPhoto): Promise<void> {
-    try {
-      await this.storage.remove(photo.id);
-      await this.refresh();
-    } catch (e) {
-      console.error(e);
-      this.error.set('No se pudo eliminar la fotografía.');
-    }
+  askRemove(photo: StoredPhoto): void {
+    this.pendingDelete.set({ kind: 'one', photo });
   }
 
-  async removeAll(): Promise<void> {
-    if (!confirm('¿Eliminar todas las fotografías almacenadas? Esta acción no se puede deshacer.')) {
-      return;
-    }
+  askRemoveAll(): void {
+    this.pendingDelete.set({ kind: 'all' });
+  }
+
+  cancelDelete(): void {
+    this.pendingDelete.set(null);
+  }
+
+  async confirmDelete(): Promise<void> {
+    const pending = this.pendingDelete();
+    if (!pending || this.deleting()) return;
+    this.deleting.set(true);
     try {
-      await this.storage.clear();
+      if (pending.kind === 'one') {
+        await this.storage.remove(pending.photo.id);
+      } else {
+        await this.storage.clear();
+      }
+      this.pendingDelete.set(null);
       await this.refresh();
     } catch (e) {
       console.error(e);
-      this.error.set('No se pudieron eliminar las fotografías.');
+      this.error.set('No se pudo completar la eliminación. Intente nuevamente.');
+      this.pendingDelete.set(null);
+    } finally {
+      this.deleting.set(false);
     }
   }
 }

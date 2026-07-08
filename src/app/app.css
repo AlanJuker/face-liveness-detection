@@ -1,26 +1,40 @@
 :host {
-  --blue: #1e56a0;
-  --blue-dark: #143c74;
-  --blue-soft: #e8effa;
-
   display: flex;
   flex-direction: column;
   min-height: 100vh;
-  background: #f0f4fa;
-  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 1rem;
+  z-index: 50;
+  background: var(--surface);
+  color: var(--blue-700);
+  font-weight: 600;
+  padding: 0.6rem 1rem;
+  border-radius: var(--r-ctl);
+  box-shadow: var(--shadow-2);
+  text-decoration: none;
+  transition: top var(--t-fast);
+}
+
+.skip-link:focus-visible {
+  top: 0.75rem;
 }
 
 .gov-header {
-  background: var(--blue-dark);
+  background: var(--blue-700);
   color: #ffffff;
-  border-bottom: 4px solid var(--blue);
+  border-bottom: 2px solid var(--blue-500);
 }
 
 .gov-header-inner {
-  max-width: 960px;
+  max-width: var(--content);
   width: 100%;
   margin: 0 auto;
-  padding: 0.9rem 1.25rem;
+  padding: 0.85rem 1.25rem;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -35,13 +49,13 @@
 
 .gov-mark {
   font-weight: 700;
-  font-size: 1.05rem;
-  letter-spacing: 0.02em;
+  font-size: var(--fs-md);
+  letter-spacing: 0.01em;
 }
 
 .gov-area {
-  font-size: 0.85rem;
-  color: #c8d6ea;
+  font-size: var(--fs-xs);
+  color: rgb(255 255 255 / 0.72);
 }
 
 .gov-nav {
@@ -50,13 +64,13 @@
 }
 
 .gov-nav a {
-  color: #dbe6f5;
+  color: rgb(255 255 255 / 0.72);
   text-decoration: none;
-  font-size: 0.9rem;
+  font-size: var(--fs-sm);
   font-weight: 600;
   padding: 0.4rem 0.9rem;
-  border-radius: 6px;
-  transition: background 0.15s, color 0.15s;
+  border-radius: var(--r-ctl);
+  transition: background var(--t-fast), color var(--t-fast);
 }
 
 .gov-nav a:hover {
@@ -64,18 +78,27 @@
   color: #ffffff;
 }
 
-.gov-nav a.active {
-  background: #ffffff;
-  color: var(--blue-dark);
+.gov-nav a:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgb(255 255 255 / 0.5);
 }
 
-router-outlet + * {
+.gov-nav a.active {
+  background: #ffffff;
+  color: var(--blue-700);
+}
+
+#contenido {
   flex: 1;
 }
 
 .page-foot {
-  font-size: 0.78rem;
-  color: #8595ac;
+  max-width: var(--content);
+  width: 100%;
+  margin: 0 auto;
+  box-sizing: border-box;
+  font-size: var(--fs-xs);
+  color: var(--ink-soft);
   text-align: center;
-  padding: 0 1rem 1.5rem;
+  padding: 0 1.25rem 1.5rem;
 }

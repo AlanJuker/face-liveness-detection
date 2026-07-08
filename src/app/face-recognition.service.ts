@@ -4,12 +4,23 @@ import * as faceapi from '@vladmandic/face-api';
 export interface LiveFrame {
   /** Qué tan abiertos están los ojos (Eye Aspect Ratio promedio). */
   eyeOpenness: number;
+  /** EAR por ojo: permite exigir que un parpadeo sea bilateral. */
+  eyeOpennessLeft: number;
+  eyeOpennessRight: number;
   /** Probabilidad 0..1 de que la persona esté sonriendo. */
   smile: number;
   /** Giro de cabeza: negativo = un lado, positivo = el otro, ~0 = de frente. */
   yaw: number;
   /** Caja del rostro relativa al video (0..1) para posicionar la guía. */
   box: { x: number; y: number; width: number; height: number };
+}
+
+export interface AnalyzeOptions {
+  /** La red de expresiones solo hace falta para el reto de la sonrisa;
+   * omitirla acelera el bucle (clave para captar parpadeos naturales). */
+  withExpressions?: boolean;
+  /** Tamaño de entrada del detector (múltiplo de 32): menor = más rápido. */
+  inputSize?: 224 | 320 | 416;
 }
 
 /**
@@ -35,15 +46,22 @@ export class FaceRecognitionService {
    * Analiza el fotograma actual detectando TODAS las caras presentes.
    * Devuelve cuántas hay y las métricas de vida (ojos, sonrisa, giro) de la
    * cara principal (la de mayor tamaño), o frame null si no hay ninguna.
+   * Los landmarks se calculan sobre el recorte del rostro a resolución
+   * nativa, así que reducir inputSize del detector no degrada el EAR.
    */
-  async analyzeFrame(video: HTMLVideoElement): Promise<{ faces: number; frame: LiveFrame | null }> {
-    const results = await faceapi
-      .detectAllFaces(
-        video,
-        new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 }),
-      )
-      .withFaceLandmarks()
-      .withFaceExpressions();
+  async analyzeFrame(
+    video: HTMLVideoElement,
+    options: AnalyzeOptions = {},
+  ): Promise<{ faces: number; frame: LiveFrame | null }> {
+    const { withExpressions = true, inputSize = 320 } = options;
+    const detector = faceapi.detectAllFaces(
+      video,
+      new faceapi.TinyFaceDetectorOptions({ inputSize, scoreThreshold: 0.5 }),
+    );
+
+    const results = withExpressions
+      ? await detector.withFaceLandmarks().withFaceExpressions()
+      : await detector.withFaceLandmarks();
 
     if (results.length === 0) return { faces: 0, frame: null };
 
@@ -52,10 +70,8 @@ export class FaceRecognitionService {
     );
 
     const landmarks = primary.landmarks;
-    const eyeOpenness =
-      (this.eyeAspectRatio(landmarks.getLeftEye()) +
-        this.eyeAspectRatio(landmarks.getRightEye())) /
-      2;
+    const eyeOpennessLeft = this.eyeAspectRatio(landmarks.getLeftEye());
+    const eyeOpennessRight = this.eyeAspectRatio(landmarks.getRightEye());
 
     const box = primary.detection.box;
     const vw = video.videoWidth || 1;
@@ -64,8 +80,12 @@ export class FaceRecognitionService {
     return {
       faces: results.length,
       frame: {
-        eyeOpenness,
-        smile: primary.expressions.happy,
+        eyeOpenness: (eyeOpennessLeft + eyeOpennessRight) / 2,
+        eyeOpennessLeft,
+        eyeOpennessRight,
+        smile: withExpressions
+          ? (primary as unknown as { expressions: { happy: number } }).expressions.happy
+          : 0,
         yaw: this.headYaw(landmarks),
         box: { x: box.x / vw, y: box.y / vh, width: box.width / vw, height: box.height / vh },
       },

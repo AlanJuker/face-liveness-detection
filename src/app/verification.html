@@ -8,9 +8,11 @@
       </p>
     </div>
 
+    <p class="sr-only" role="status" aria-live="polite">{{ srStatus() }}</p>
+
     @if (phase() === 'intro') {
       <div class="intro">
-        <div class="intro-icon">
+        <div class="intro-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <rect x="3" y="6" width="14" height="12" rx="2" />
             <path d="M17 10.5 21 8v8l-4-2.5" stroke-linejoin="round" />
@@ -20,7 +22,7 @@
           La verificación toma menos de un minuto. Antes de encender la cámara le mostraremos
           algunas indicaciones para que el proceso sea exitoso.
         </p>
-        <button class="primary" (click)="openPrep()" [disabled]="!modelsReady()">
+        <button class="btn btn-primary" (click)="openPrep($event)" [disabled]="!modelsReady()">
           {{ modelsReady() ? 'Iniciar verificación' : 'Preparando…' }}
         </button>
         <p class="privacy">
@@ -31,150 +33,186 @@
       </div>
     }
 
+    @if (phase() === 'load-error') {
+      <div class="intro">
+        <p class="intro-text">
+          No fue posible preparar la verificación. Revise su conexión a internet e inténtelo
+          nuevamente.
+        </p>
+        <button class="btn btn-primary" (click)="loadModels()">Reintentar</button>
+      </div>
+    }
+
     <div
       class="video-wrap"
-      [class.hidden]="phase() === 'intro'"
+      [class.hidden]="phase() === 'intro' || phase() === 'load-error'"
       [class.face-on]="faceOk()"
       [class.face-bad]="faceBad()"
     >
-        <video #video autoplay muted playsinline></video>
+      <video #video autoplay muted playsinline aria-label="Vista previa de su cámara"></video>
 
-        <span class="corner tl"></span>
-        <span class="corner tr"></span>
-        <span class="corner bl"></span>
-        <span class="corner br"></span>
+      <span class="corner tl" aria-hidden="true"></span>
+      <span class="corner tr" aria-hidden="true"></span>
+      <span class="corner bl" aria-hidden="true"></span>
+      <span class="corner br" aria-hidden="true"></span>
 
-        <div class="oval-guide"></div>
+      <div class="oval-guide" aria-hidden="true"></div>
 
-        @if (faceOk() && (phase() === 'positioning' || phase() === 'testing')) {
-          <div class="scan-area">
-            <div class="scan-line"></div>
-          </div>
-        }
+      @if (faceOk() && (phase() === 'positioning' || phase() === 'testing')) {
+        <div class="scan-area" aria-hidden="true">
+          <div class="scan-line"></div>
+        </div>
+      }
 
-        @if (phase() === 'testing' && current(); as c) {
-          <div class="instruction-overlay" [class.feedback-mode]="!!liveFeedback()">
-            {{ liveFeedback() || c.instruction }}
-          </div>
-        }
-        @if (phase() === 'positioning' && faceOk()) {
-          <div class="instruction-overlay">La verificación comenzará en un instante…</div>
-        }
+      @if (phase() === 'testing' && current(); as c) {
+        <div class="instruction-overlay" [class.feedback-mode]="!!liveFeedback()">
+          {{ liveFeedback() || c.instruction }}
+        </div>
+      }
+      @if (phase() === 'positioning' && faceOk()) {
+        <div class="instruction-overlay">Perfecto, no se mueva…</div>
+      }
 
-        @if ((phase() === 'positioning' || phase() === 'testing') && framingHint()) {
-          <div class="framing-bar">{{ framingHint() }}</div>
-        }
+      @if ((phase() === 'positioning' || phase() === 'testing') && framingHint()) {
+        <div class="framing-bar">{{ framingHint() }}</div>
+      }
 
-        @if (phase() === 'camera-error') {
-          <div class="veil">
-            <p class="verdict">Cámara no disponible</p>
-            <p class="reason">{{ failReason() }}</p>
-          </div>
-        }
-        @if (phase() === 'success') {
-          <div class="veil success-veil">
-            <span class="result-icon ok-icon">✓</span>
-            <p class="verdict">Verificación exitosa</p>
-            <p class="reason">Se confirmó la presencia de una persona real.</p>
-          </div>
-        }
-        @if (phase() === 'failed') {
-          <div class="veil fail-veil">
-            <span class="result-icon fail-icon">✕</span>
-            <p class="verdict">Verificación no superada</p>
-            <p class="reason">{{ failReason() }}</p>
-          </div>
-        }
+      @if (phase() === 'requesting-camera') {
+        <div class="veil">
+          <span class="spinner" aria-hidden="true"></span>
+          <p class="reason">
+            Esperando su autorización para usar la cámara. Seleccione «Permitir» en el aviso de su
+            navegador.
+          </p>
+        </div>
+      }
+      @if (phase() === 'camera-error') {
+        <div class="veil" role="alert">
+          <p class="verdict">No fue posible acceder a la cámara</p>
+          <p class="reason">
+            Otorgue el permiso de cámara en la configuración de su navegador y pulse «Reintentar».
+          </p>
+        </div>
+      }
+      @if (phase() === 'success') {
+        <div class="veil success-veil" role="alert">
+          <span class="result-icon ok-icon" aria-hidden="true">✓</span>
+          <p class="verdict">Verificación exitosa</p>
+          <p class="reason">Se confirmó la presencia de una persona real. La cámara se apagó.</p>
+        </div>
+      }
+      @if (phase() === 'failed') {
+        <div class="veil fail-veil" role="alert">
+          <span class="result-icon fail-icon" aria-hidden="true">✕</span>
+          <p class="verdict">Verificación no superada</p>
+          <p class="reason">{{ failReason() }}</p>
+        </div>
+      }
 
-        @if (debugMode) {
-          <div class="debug-bar">{{ debugInfo() }}</div>
-        }
-      </div>
+      @if (debugMode) {
+        <div class="debug-bar">{{ debugInfo() }}</div>
+      }
+    </div>
+
+    @if (phase() === 'camera-error') {
+      <section class="panel">
+        <button class="btn btn-primary" (click)="startCamera()">Reintentar</button>
+        <button class="btn btn-secondary" (click)="finish()">Cancelar</button>
+      </section>
+    }
 
     @if (phase() === 'positioning') {
       <section class="panel">
-        <p class="hint" [class.ok]="faceOk()">
-          {{
-            faceOk()
-              ? 'Encuadre correcto. La verificación comenzará en un instante…'
-              : 'Coloque su rostro dentro del óvalo para comenzar.'
-          }}
-        </p>
-        <button class="secondary" (click)="finish()">Cancelar</button>
+        <button class="btn btn-secondary" (click)="finish()">Cancelar</button>
       </section>
     }
 
     @if (phase() === 'testing') {
       <section class="panel">
-        <div class="step-header">
-          <span class="step-count">Paso {{ currentIndex() + 1 }} de {{ challenges().length }}</span>
-          <span class="timer" [class.low]="secondsLeft() <= 5">{{ secondsLeft() }} s</span>
+        <div class="test-status">
+          <ol class="steps">
+            @for (c of challenges(); track c.id; let i = $index) {
+              <li
+                class="step"
+                [class.done]="c.done"
+                [class.active]="i === currentIndex() && !c.done"
+                [attr.aria-current]="i === currentIndex() && !c.done ? 'step' : null"
+              >
+                <span class="step-dot" aria-hidden="true">{{ c.done ? '✓' : i + 1 }}</span>
+                <span>{{ c.title }}</span>
+                @if (c.done) {
+                  <span class="sr-only">completado</span>
+                }
+              </li>
+            }
+          </ol>
+          <span class="timer" role="timer" [class.low]="secondsLeft() <= 5 && !timerPaused()">
+            {{ timerPaused() ? 'En pausa' : secondsLeft() + ' s' }}
+          </span>
         </div>
-
-        @if (current(); as c) {
-          <h2 class="step-title">{{ c.title }}</h2>
-          <p class="instruction">{{ c.instruction }}</p>
-          @if (liveFeedback()) {
-            <p class="feedback">{{ liveFeedback() }}</p>
-          }
-        }
-
-        <div class="steps">
-          @for (c of challenges(); track c.id; let i = $index) {
-            <div
-              class="step"
-              [class.done]="c.done"
-              [class.active]="i === currentIndex() && !c.done"
-            >
-              <span class="step-dot">{{ c.done ? '✓' : i + 1 }}</span>
-              <span>{{ c.title }}</span>
-            </div>
-          }
-        </div>
-
-        <div class="progress"><div class="bar" [style.width.%]="progress()"></div></div>
+        <button class="btn btn-secondary" (click)="cancelTest()">Cancelar</button>
       </section>
     }
 
-    @if (phase() === 'success' || phase() === 'failed') {
+    @if (phase() === 'success') {
       <section class="panel">
-        @if (phase() === 'success') {
-          @if (capturedPhoto(); as photo) {
-            <div class="snapshot">
-              <img [src]="photo" alt="Fotografía capturada durante la verificación" />
-              <div class="snapshot-info">
-                <p>
-                  Se capturó y almacenó una fotografía de su rostro como evidencia de la
-                  verificación.
+        @if (capturedPhoto(); as photo) {
+          <div class="snapshot">
+            <img [src]="photo" alt="Fotografía capturada durante la verificación" />
+            <div class="snapshot-info">
+              @if (saveState() === 'saved') {
+                <p>Se capturó y almacenó una fotografía de su rostro como evidencia del trámite.</p>
+              } @else if (saveState() === 'saving') {
+                <p>Guardando la fotografía de evidencia…</p>
+              } @else if (saveState() === 'error') {
+                <p class="save-error">
+                  No fue posible guardar la fotografía de evidencia. Verifique su conexión.
                 </p>
-              </div>
+                <button class="btn btn-secondary btn-sm" (click)="retrySavePhoto()">
+                  Reintentar guardado
+                </button>
+              }
             </div>
-          }
-          <p class="hint ok">Puede continuar con su trámite de cambio de domicilio.</p>
-          <button class="primary" (click)="finish()">Finalizar</button>
-        } @else {
-          <p class="hint">
-            Verifique la iluminación y que su rostro sea visible; después inténtelo nuevamente.
-          </p>
-          <button class="primary" (click)="retry()">Intentar nuevamente</button>
-          <button class="secondary" (click)="finish()">Cancelar</button>
+          </div>
         }
+        <p class="hint ok">Puede continuar con su trámite de cambio de domicilio.</p>
+        <button class="btn btn-primary" (click)="finish()">Finalizar</button>
+      </section>
+    }
+
+    @if (phase() === 'failed') {
+      <section class="panel">
+        <p class="hint">{{ retryHint() }}</p>
+        @if (!maxAttemptsReached()) {
+          <button class="btn btn-primary" (click)="retry()">Intentar nuevamente</button>
+        }
+        <button class="btn btn-secondary" (click)="finish()">
+          {{ maxAttemptsReached() ? 'Finalizar' : 'Cancelar' }}
+        </button>
       </section>
     }
   </div>
 </main>
 
 @if (showPrep()) {
-  <div class="modal-backdrop" (click)="cancelPrep()">
-    <div class="modal carousel-modal" role="dialog" aria-modal="true" (click)="$event.stopPropagation()">
+  <div class="modal-backdrop">
+    <div
+      class="modal carousel-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="prep-title"
+      tabindex="-1"
+      (keydown.escape)="cancelPrep()"
+      #prepDialog
+    >
       <button class="modal-close" (click)="cancelPrep()" aria-label="Cerrar">✕</button>
-      <h2>Antes de comenzar</h2>
+      <h2 id="prep-title">Antes de comenzar</h2>
 
       <div class="carousel">
         <div class="carousel-track" [style.transform]="'translateX(-' + prepSlide() * 100 + '%)'">
           <!-- Lámina 1: retirar accesorios -->
-          <div class="slide">
-            <div class="illustration">
+          <div class="slide" [attr.aria-hidden]="prepSlide() !== 0" [attr.inert]="prepSlide() !== 0 ? '' : null">
+            <div class="illustration" aria-hidden="true">
               <svg viewBox="0 0 200 150">
                 <circle cx="100" cy="82" r="44" class="ill-head" />
                 <path d="M78 100 Q100 114 122 100" class="ill-mouth" />
@@ -198,8 +236,8 @@
           </div>
 
           <!-- Lámina 2: iluminación -->
-          <div class="slide">
-            <div class="illustration">
+          <div class="slide" [attr.aria-hidden]="prepSlide() !== 1" [attr.inert]="prepSlide() !== 1 ? '' : null">
+            <div class="illustration" aria-hidden="true">
               <svg viewBox="0 0 200 150">
                 <g class="ill-sun">
                   <circle cx="100" cy="34" r="14" />
@@ -225,8 +263,8 @@
           </div>
 
           <!-- Lámina 3: encuadre del rostro, una sola persona -->
-          <div class="slide">
-            <div class="illustration">
+          <div class="slide" [attr.aria-hidden]="prepSlide() !== 2" [attr.inert]="prepSlide() !== 2 ? '' : null">
+            <div class="illustration" aria-hidden="true">
               <svg viewBox="0 0 200 150">
                 <rect x="46" y="8" width="108" height="134" rx="10" class="ill-frame" />
                 <ellipse cx="100" cy="75" rx="34" ry="46" class="ill-oval" />
@@ -247,8 +285,8 @@
           </div>
 
           <!-- Lámina 4: los tres gestos -->
-          <div class="slide">
-            <div class="illustration">
+          <div class="slide" [attr.aria-hidden]="prepSlide() !== 3" [attr.inert]="prepSlide() !== 3 ? '' : null">
+            <div class="illustration" aria-hidden="true">
               <svg viewBox="0 0 200 150">
                 <g class="ill-gesture-head">
                   <circle cx="100" cy="78" r="42" class="ill-head" />
@@ -267,15 +305,12 @@
               </svg>
             </div>
             <h3>Realice tres gestos sencillos</h3>
-            <p>
-              Se le pedirá parpadear, sonreír y girar la cabeza. Tendrá 20 segundos para cada
-              gesto. Al terminar, la cámara se encenderá.
-            </p>
+            <p>Se le pedirá parpadear, sonreír y girar la cabeza. Dispondrá de 20 segundos para cada gesto.</p>
           </div>
         </div>
       </div>
 
-      <div class="carousel-dots">
+      <div class="carousel-dots" aria-hidden="true">
         @for (i of prepSlides; track i) {
           <span class="dot" [class.active]="i === prepSlide()"></span>
         }
@@ -283,11 +318,12 @@
 
       <div class="modal-actions carousel-actions">
         @if (prepSlide() > 0) {
-          <button class="secondary" (click)="prevSlide()">Atrás</button>
+          <button class="btn btn-secondary" (click)="prevSlide()">Atrás</button>
         } @else {
-          <button class="secondary" (click)="cancelPrep()">Cancelar</button>
+          <button class="btn btn-secondary" (click)="cancelPrep()">Cancelar</button>
         }
-        <button class="primary" (click)="nextSlide()">
+        <button class="btn btn-primary" (click)="nextSlide()">
+          <span class="sr-only">Indicación {{ prepSlide() + 1 }} de {{ prepSlides.length }}.</span>
           {{ prepSlide() === prepSlides.length - 1 ? 'Entendido, encender cámara' : 'Siguiente' }}
         </button>
       </div>

@@ -1,20 +1,30 @@
+<a class="skip-link" href="#contenido">Ir al contenido principal</a>
+
 <header class="gov-header">
   <div class="gov-header-inner">
     <div class="gov-titles">
       <span class="gov-mark">Trámite de Cambio de Domicilio</span>
       <span class="gov-area">Verificación de identidad</span>
     </div>
-    <nav class="gov-nav">
-      <a routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">
+    <nav class="gov-nav" aria-label="Navegación principal">
+      <a
+        routerLink="/"
+        routerLinkActive="active"
+        ariaCurrentWhenActive="page"
+        [routerLinkActiveOptions]="{ exact: true }"
+      >
         Verificación
       </a>
-      <a routerLink="/fotos" routerLinkActive="active">Fotografías</a>
+      <a routerLink="/fotos" routerLinkActive="active" ariaCurrentWhenActive="page">Fotografías</a>
     </nav>
   </div>
 </header>
 
-<router-outlet />
+<div id="contenido">
+  <router-outlet />
+</div>
 
 <footer class="page-foot">
-  Sistema de verificación de identidad · El procesamiento se realiza localmente en su navegador.
+  El análisis de gestos se realiza localmente en su navegador; la fotografía de evidencia se
+  almacena en el servidor del trámite.
 </footer>

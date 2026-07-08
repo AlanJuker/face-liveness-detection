@@ -4,24 +4,52 @@ import {
   OnDestroy,
   OnInit,
   computed,
+  effect,
   inject,
   signal,
   viewChild,
 } from '@angular/core';
-import { FaceRecognitionService, LiveFrame } from './face-recognition.service';
+import { AnalyzeOptions, FaceRecognitionService, LiveFrame } from './face-recognition.service';
 import { PhotoStorageService } from './photo-storage.service';
 
 /**
- * Flujo: intro (sin cámara) → popup de instrucciones → positioning (cámara
- * encendida, centrar el rostro) → testing (gestos) → success | failed.
+ * Flujo: intro (sin cámara) → popup de instrucciones → requesting-camera
+ * (permiso del navegador) → positioning (centrar el rostro) → testing
+ * (gestos) → success | failed. load-error cubre el fallo de los modelos.
  */
-type Phase = 'intro' | 'camera-error' | 'positioning' | 'testing' | 'success' | 'failed';
+type Phase =
+  | 'intro'
+  | 'load-error'
+  | 'requesting-camera'
+  | 'camera-error'
+  | 'positioning'
+  | 'testing'
+  | 'success'
+  | 'failed';
+
+type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 interface Challenge {
   id: 'blink' | 'smile' | 'turn';
   title: string;
   instruction: string;
   done: boolean;
+}
+
+/** Muestra del ojo para el detector de parpadeo (búfer de ~3.5 s). */
+interface EyeSample {
+  t: number;
+  ear: number;
+  earL: number;
+  earR: number;
+  yaw: number;
+  cx: number;
+  cy: number;
+  w: number;
+  /** Velocidades respecto a la muestra anterior, en unidades/segundo. */
+  centerSpeed: number;
+  widthSpeed: number;
+  yawSpeed: number;
 }
 
 @Component({
@@ -34,6 +62,15 @@ export class Verification implements OnInit, OnDestroy {
   private readonly faceService = inject(FaceRecognitionService);
   private readonly photoStorage = inject(PhotoStorageService);
   private readonly videoRef = viewChild.required<ElementRef<HTMLVideoElement>>('video');
+  private readonly prepDialogRef = viewChild<ElementRef<HTMLElement>>('prepDialog');
+
+  constructor() {
+    // Mueve el foco al diálogo de indicaciones cuando se abre.
+    effect(() => {
+      const dialog = this.prepDialogRef()?.nativeElement;
+      if (dialog && this.showPrep()) dialog.focus();
+    });
+  }
 
   readonly phase = signal<Phase>('intro');
   readonly modelsReady = signal(false);
@@ -43,9 +80,14 @@ export class Verification implements OnInit, OnDestroy {
   readonly challenges = signal<Challenge[]>([]);
   readonly currentIndex = signal(0);
   readonly secondsLeft = signal(0);
+  readonly timerPaused = signal(false);
   readonly failReason = signal('');
-  /** Retroalimentación en vivo durante el reto actual (p. ej. "abra los ojos"). */
+  readonly retryHint = signal('');
+  readonly attempts = signal(0);
+  /** Guía en vivo del reto actual (siempre refleja el estado presente). */
   readonly liveFeedback = signal('');
+  /** Estado del guardado de la fotografía de evidencia. */
+  readonly saveState = signal<SaveState>('idle');
 
   /** Modo diagnóstico (abrir la app con ?debug): muestra las métricas en vivo. */
   readonly debugMode = new URLSearchParams(window.location.search).has('debug');
@@ -53,7 +95,6 @@ export class Verification implements OnInit, OnDestroy {
 
   /** Ventana previa con recomendaciones (retirar accesorios, iluminación…). */
   readonly showPrep = signal(false);
-  /** Lámina visible del carrusel de indicaciones. */
   readonly prepSlide = signal(0);
   static readonly PREP_SLIDES = 4;
   readonly prepSlides = Array.from({ length: Verification.PREP_SLIDES }, (_, i) => i);
@@ -61,11 +102,9 @@ export class Verification implements OnInit, OnDestroy {
   /** Fotografía del rostro capturada al aprobar la verificación (data URL JPEG). */
   readonly capturedPhoto = signal<string | null>(null);
 
-  /** El rostro está correctamente encuadrado y es el único en escena. */
   readonly faceOk = computed(
     () => this.faceDetected() && !this.multipleFaces() && this.faceInOval(),
   );
-  /** Hay un problema de encuadre que se marca en rojo. */
   readonly faceBad = computed(
     () => this.faceDetected() && (this.multipleFaces() || !this.faceInOval()),
   );
@@ -73,11 +112,8 @@ export class Verification implements OnInit, OnDestroy {
   readonly current = computed<Challenge | null>(
     () => this.challenges()[this.currentIndex()] ?? null,
   );
-  readonly progress = computed(() => {
-    const list = this.challenges();
-    if (list.length === 0) return 0;
-    return Math.round((list.filter((c) => c.done).length / list.length) * 100);
-  });
+
+  readonly maxAttemptsReached = computed(() => this.attempts() >= Verification.MAX_ATTEMPTS);
 
   /** Mensaje de guía de encuadre (positioning y testing). */
   readonly framingHint = computed(() => {
@@ -87,84 +123,90 @@ export class Verification implements OnInit, OnDestroy {
     return '';
   });
 
-  /** Última posición conocida del rostro, para recortar la fotografía. */
-  private lastBox: { x: number; y: number; width: number; height: number } | null = null;
+  /** Un único mensaje de estado para lectores de pantalla. */
+  readonly srStatus = computed(() => {
+    if (this.phase() === 'testing') {
+      return this.framingHint() || this.liveFeedback() || (this.current()?.instruction ?? '');
+    }
+    if (this.phase() === 'positioning') {
+      return this.framingHint() || 'Encuadre correcto, la verificación va a comenzar.';
+    }
+    return '';
+  });
 
+  private lastBox: { x: number; y: number; width: number; height: number } | null = null;
   private stream: MediaStream | null = null;
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
+  /** Elemento que abrió el popup, para devolverle el foco al cerrar. */
+  private prepTrigger: HTMLElement | null = null;
 
-  // --- Estado del reto de parpadeo (umbral adaptado a cada cámara/usuario) ---
-  /** Mayor apertura ocular observada durante el reto: sirve de referencia. */
-  private baselineEyeOpenness = 0;
-  private consecutiveClosedFrames = 0;
-  private eyesClosedConfirmed = false;
+  // --- Detector de parpadeo: valle y recuperación sobre un búfer temporal ---
+  private eyeBuf: EyeSample[] = [];
+  private blinkPhase: 'open' | 'dip' = 'open';
+  private dipStart = 0;
+  private dipMin = 1;
 
-  private challengeDeadline = 0;
-  /** Pausa entre retos para que un gesto no contamine el siguiente. */
-  private settleUntil = 0;
-  /** Fotogramas seguidos con encuadre correcto antes de iniciar los retos. */
-  private stableFrames = 0;
-
-  // --- Estado anti-suplantación (los gestos deben ser TRANSICIONES) ---
-  /** Fotograma anterior, para medir el movimiento de la cabeza/imagen. */
-  private prevFrame: LiveFrame | null = null;
-  /** Sonrisa: primero debe verse un gesto serio (una foto sonriente no puede). */
+  // --- Estado de los retos de sonrisa y giro (transiciones) ---
   private neutralFrames = 0;
   private neutralSeen = false;
-  /** Giro: primero de frente, luego girar y regresar al centro. */
   private frontalFrames = 0;
   private frontalSeen = false;
   private turnedSeen = false;
-  /** Continuidad: si el rostro desaparece demasiado tiempo, la prueba falla. */
-  private faceAbsentSince = 0;
 
+  private challengeDeadline = 0;
+  private settleUntil = 0;
+  private stableFrames = 0;
+  private faceAbsentSince = 0;
+  private lastTickAt = 0;
+
+  private static readonly MAX_ATTEMPTS = 3;
   private static readonly CHALLENGE_SECONDS = 20;
   private static readonly SETTLE_MS = 1500;
   private static readonly STABLE_FRAMES_REQUIRED = 6;
+  private static readonly ABSENCE_LIMIT_MS = 3000;
+
   /**
-   * Ojos cerrados si la apertura cae por debajo del 88 % de la referencia.
-   * A distancia media la caída medida al cerrar los ojos es pequeña
-   * (p. ej. de 0.32 a 0.26, ratio ≈ 0.84), por eso el umbral es alto; una
-   * imagen estática mantiene el ratio ≈ 1.0 y nunca lo cruza.
+   * Parpadeo (valle y recuperación). Un solo fotograma con los ojos cerrados
+   * basta, validado contra una línea base robusta (percentil 75 de los
+   * últimos 2.5 s) y con controles anti-suplantación por velocidad: mover o
+   * inclinar un teléfono desplaza toda la imagen justo en el instante del
+   * falso "cierre", cosa que un parpadeo real no hace.
    */
-  private static readonly CLOSED_RATIO = 0.88;
-  /** Ojo cerrado en términos absolutos (EAR típico cerrado ≈ 0.15–0.26). */
-  private static readonly CLOSED_ABSOLUTE = 0.25;
-  /** Cierre profundo e inequívoco: cuenta con un solo fotograma. */
-  private static readonly CLOSED_DEEP_RATIO = 0.78;
-  private static readonly CLOSED_DEEP_ABSOLUTE = 0.21;
-  /** Ojos abiertos de nuevo al superar el 94 % de la referencia. */
-  private static readonly REOPEN_RATIO = 0.94;
-  private static readonly REOPEN_ABSOLUTE = 0.3;
-  private static readonly CLOSED_FRAMES_REQUIRED = 2;
+  private static readonly DIP_RATIO = 0.88;
+  private static readonly DIP_ABSOLUTE = 0.24;
+  private static readonly BILATERAL_RATIO = 0.9;
+  private static readonly REOPEN_RATIO = 0.93;
+  private static readonly PROMINENCE_MIN = 0.08;
+  private static readonly PRE_OPEN_WINDOW_MS = 700;
+  private static readonly MAX_DIP_MS = 2500;
+  private static readonly BASELINE_WINDOW_MS = 2500;
+  private static readonly BASELINE_MIN_SAMPLES = 8;
+  private static readonly BUFFER_MS = 3500;
+  /** Límites de velocidad (unidades relativas por segundo). */
+  private static readonly STILL_CENTER_SPEED = 0.2;
+  private static readonly STILL_WIDTH_SPEED = 0.2;
+  private static readonly STILL_YAW_SPEED = 0.6;
+
   private static readonly SMILE_MIN = 0.65;
-  /** Antes de sonreír debe verse un gesto claramente serio. */
   private static readonly NEUTRAL_MAX = 0.3;
   private static readonly YAW_MIN = 0.32;
-  /** Movimiento máximo entre fotogramas para considerar la cabeza quieta
-   * (mover o inclinar un teléfono con una foto desplaza toda la imagen).
-   * Tolerante al micro-movimiento natural y al jitter del detector. */
-  private static readonly STILL_CENTER_DELTA = 0.05;
-  private static readonly STILL_WIDTH_DELTA = 0.05;
-  private static readonly STILL_YAW_DELTA = 0.14;
-  /** Para completar el giro basta volver aproximadamente al centro. */
   private static readonly RETURN_YAW_MAX = 0.22;
-  /** Si el rostro desaparece más de este tiempo durante la prueba, falla. */
-  private static readonly ABSENCE_LIMIT_MS = 3000;
-  /** El parpadeo solo se evalúa con la cabeza de frente (evita falsos
-   * positivos: al girar la cabeza los landmarks de los ojos se estrechan). */
   private static readonly FRONTAL_YAW_MAX = 0.18;
-  /** Óvalo guía (coordenadas relativas al video, igual que en el CSS). */
+  /** Óvalo guía en coordenadas del RECUADRO visible (coincide con el CSS). */
   private static readonly OVAL = { cx: 0.5, cy: 0.5, rx: 0.28, ry: 0.42 };
 
   async ngOnInit(): Promise<void> {
+    await this.loadModels();
+  }
+
+  async loadModels(): Promise<void> {
+    this.phase.set('intro');
     try {
       await this.faceService.loadModels();
       this.modelsReady.set(true);
     } catch (e) {
-      this.phase.set('camera-error');
-      this.failReason.set('No fue posible cargar los componentes de verificación.');
+      this.phase.set('load-error');
       console.error(e);
     }
   }
@@ -177,13 +219,14 @@ export class Verification implements OnInit, OnDestroy {
 
   // ---- flujo: popup → cámara → posicionamiento → retos ----
 
-  openPrep(): void {
-    this.prepSlide.set(0);
+  openPrep(event?: Event): void {
+    this.prepTrigger = (event?.currentTarget as HTMLElement) ?? null;
     this.showPrep.set(true);
   }
 
   cancelPrep(): void {
     this.showPrep.set(false);
+    this.prepTrigger?.focus();
   }
 
   nextSlide(): void {
@@ -200,14 +243,16 @@ export class Verification implements OnInit, OnDestroy {
 
   async confirmStart(): Promise<void> {
     this.showPrep.set(false);
+    this.attempts.set(0);
     await this.startCamera();
   }
 
-  private async startCamera(): Promise<void> {
+  async startCamera(): Promise<void> {
     if (this.stream) {
       this.beginPositioning();
       return;
     }
+    this.phase.set('requesting-camera');
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
@@ -220,9 +265,6 @@ export class Verification implements OnInit, OnDestroy {
       this.loop();
     } catch (e) {
       this.phase.set('camera-error');
-      this.failReason.set(
-        'No fue posible acceder a la cámara. Otorgue el permiso correspondiente y recargue la página.',
-      );
       console.error(e);
     }
   }
@@ -235,7 +277,9 @@ export class Verification implements OnInit, OnDestroy {
   private beginPositioning(): void {
     this.stableFrames = 0;
     this.capturedPhoto.set(null);
+    this.saveState.set('idle');
     this.failReason.set('');
+    this.retryHint.set('');
     this.liveFeedback.set('');
     this.phase.set('positioning');
   }
@@ -246,7 +290,7 @@ export class Verification implements OnInit, OnDestroy {
       {
         id: 'blink',
         title: 'Parpadeo',
-        instruction: 'Cierre ambos ojos, manténgalos cerrados un segundo y vuelva a abrirlos.',
+        instruction: 'Parpadee con naturalidad mirando de frente.',
         done: false,
       },
       {
@@ -258,19 +302,20 @@ export class Verification implements OnInit, OnDestroy {
       {
         id: 'turn',
         title: 'Giro de cabeza',
-        instruction:
-          'Mire de frente, gire lentamente la cabeza hacia un lado y regrese al centro.',
+        instruction: 'Mire de frente, gire lentamente la cabeza hacia un lado y regrese al centro.',
         done: false,
       },
     ];
     this.challenges.set(pool.sort(() => Math.random() - 0.5));
     this.currentIndex.set(0);
+    this.lastTickAt = 0;
     this.resetChallengeState();
     this.phase.set('testing');
   }
 
   /** Volver a intentar: la cámara sigue encendida, regresa al encuadre. */
   retry(): void {
+    if (this.maxAttemptsReached()) return;
     this.beginPositioning();
   }
 
@@ -281,10 +326,32 @@ export class Verification implements OnInit, OnDestroy {
     this.phase.set('intro');
   }
 
+  cancelTest(): void {
+    this.finish();
+  }
+
+  async retrySavePhoto(): Promise<void> {
+    const photo = this.capturedPhoto();
+    if (!photo) return;
+    await this.savePhoto(photo);
+  }
+
+  private async savePhoto(photo: string): Promise<void> {
+    this.saveState.set('saving');
+    try {
+      await this.photoStorage.save(photo);
+      this.saveState.set('saved');
+    } catch (e) {
+      this.saveState.set('error');
+      console.error('No se pudo guardar la foto', e);
+    }
+  }
+
   private resetChallengeState(): void {
-    this.baselineEyeOpenness = 0;
-    this.consecutiveClosedFrames = 0;
-    this.eyesClosedConfirmed = false;
+    this.eyeBuf = [];
+    this.blinkPhase = 'open';
+    this.dipStart = 0;
+    this.dipMin = 1;
     this.neutralFrames = 0;
     this.neutralSeen = false;
     this.frontalFrames = 0;
@@ -292,31 +359,27 @@ export class Verification implements OnInit, OnDestroy {
     this.turnedSeen = false;
     this.faceAbsentSince = 0;
     this.liveFeedback.set('');
+    this.timerPaused.set(false);
     this.challengeDeadline = Date.now() + Verification.CHALLENGE_SECONDS * 1000;
     this.secondsLeft.set(Verification.CHALLENGE_SECONDS);
   }
 
+  // ---- bucle principal de análisis ----
+
   /**
-   * La cabeza está quieta si el rostro apenas se movió respecto al fotograma
-   * anterior. Mover, acercar o inclinar un teléfono con una foto desplaza y
-   * escala toda la imagen a la vez, lo que rompe esta condición.
+   * Durante el parpadeo el bucle corre lo más rápido posible y sin la red de
+   * expresiones (~10-14 fps): un parpadeo natural pasa solo 60-100 ms con los
+   * ojos bajo el umbral y a 3-6 fps era prácticamente indetectable.
    */
-  private isStill(frame: LiveFrame): boolean {
-    const prev = this.prevFrame;
-    if (!prev) return false;
-    const dcx = Math.abs(frame.box.x + frame.box.width / 2 - (prev.box.x + prev.box.width / 2));
-    const dcy = Math.abs(frame.box.y + frame.box.height / 2 - (prev.box.y + prev.box.height / 2));
-    const dw = Math.abs(frame.box.width - prev.box.width);
-    const dyaw = Math.abs(frame.yaw - prev.yaw);
-    return (
-      dcx < Verification.STILL_CENTER_DELTA &&
-      dcy < Verification.STILL_CENTER_DELTA &&
-      dw < Verification.STILL_WIDTH_DELTA &&
-      dyaw < Verification.STILL_YAW_DELTA
-    );
+  private analyzeOptions(): AnalyzeOptions {
+    const challenge = this.phase() === 'testing' ? this.current() : null;
+    if (challenge?.id === 'smile') return { withExpressions: true, inputSize: 320 };
+    return { withExpressions: false, inputSize: 224 };
   }
 
-  // ---- bucle principal de análisis (~8 fotogramas por segundo) ----
+  private loopDelay(): number {
+    return this.phase() === 'testing' && this.current()?.id === 'blink' ? 30 : 120;
+  }
 
   private async loop(): Promise<void> {
     if (this.destroyed || !this.stream) return;
@@ -326,21 +389,22 @@ export class Verification implements OnInit, OnDestroy {
       let faces = 0;
       let frame: LiveFrame | null = null;
       try {
-        ({ faces, frame } = await this.faceService.analyzeFrame(video));
+        ({ faces, frame } = await this.faceService.analyzeFrame(video, this.analyzeOptions()));
       } catch (e) {
         console.error(e);
       }
       this.faceDetected.set(faces > 0);
       this.multipleFaces.set(faces > 1);
-      this.faceInOval.set(frame ? this.isInsideOval(frame.box) : false);
+      this.faceInOval.set(frame ? this.isInsideOval(frame.box, video) : false);
       if (frame) this.lastBox = frame.box;
 
       if (this.debugMode) {
+        const base = this.blinkBaseline();
         this.debugInfo.set(
           frame
-            ? `caras: ${faces} · ojos (EAR): ${frame.eyeOpenness.toFixed(3)} · referencia: ${this.baselineEyeOpenness.toFixed(3)} · ` +
-                `ratio: ${(this.baselineEyeOpenness ? frame.eyeOpenness / this.baselineEyeOpenness : 0).toFixed(2)} · ` +
-                `sonrisa: ${frame.smile.toFixed(2)} · giro: ${frame.yaw.toFixed(2)} · en óvalo: ${this.faceInOval()}`
+            ? `caras: ${faces} · EAR: ${frame.eyeOpenness.toFixed(3)} (I ${frame.eyeOpennessLeft.toFixed(2)} / D ${frame.eyeOpennessRight.toFixed(2)}) · ` +
+                `base P75: ${base ? base.ear.toFixed(3) : '—'} · sonrisa: ${frame.smile.toFixed(2)} · giro: ${frame.yaw.toFixed(2)} · ` +
+                `óvalo: ${this.faceInOval()} · fase parpadeo: ${this.blinkPhase}`
             : 'sin rostro',
         );
       }
@@ -355,20 +419,22 @@ export class Verification implements OnInit, OnDestroy {
       }
     }
 
-    this.loopTimer = setTimeout(() => this.loop(), 120);
+    this.loopTimer = setTimeout(() => this.loop(), this.loopDelay());
   }
 
   private tickTesting(frame: LiveFrame | null): void {
     const now = Date.now();
+    const elapsed = this.lastTickAt ? Math.min(now - this.lastTickAt, 1000) : 0;
+    this.lastTickAt = now;
 
     // Continuidad: si el rostro desaparece demasiado tiempo (p. ej. para
     // cambiar la imagen de un teléfono), la prueba falla por completo.
     if (!frame) {
       if (this.faceAbsentSince === 0) this.faceAbsentSince = now;
       if (now - this.faceAbsentSince > Verification.ABSENCE_LIMIT_MS) {
-        this.phase.set('failed');
-        this.failReason.set(
-          'Se perdió la continuidad del rostro durante la prueba. Manténgase frente a la cámara todo el tiempo.',
+        this.fail(
+          'Su rostro dejó de ser visible durante la prueba.',
+          'Manténgase frente a la cámara durante toda la verificación.',
         );
         return;
       }
@@ -379,39 +445,50 @@ export class Verification implements OnInit, OnDestroy {
     // Pausa de asentamiento entre retos: no se evalúa ni corre el tiempo.
     if (now < this.settleUntil) {
       this.challengeDeadline = now + Verification.CHALLENGE_SECONDS * 1000;
-      this.prevFrame = frame ?? this.prevFrame;
       return;
     }
+    if (this.liveFeedback().startsWith('Correcto')) this.liveFeedback.set('');
 
-    // Encuadre incorrecto (sin cara, varias caras o fuera del óvalo):
-    // se pausa la evaluación y el temporizador no avanza en su contra.
+    // Encuadre incorrecto: se pausa la evaluación y el temporizador
+    // no avanza en su contra (se muestra "En pausa").
     if (!frame || !this.faceOk()) {
-      this.challengeDeadline += 120;
-      this.prevFrame = frame ?? this.prevFrame;
+      this.challengeDeadline += elapsed;
+      this.timerPaused.set(true);
       return;
     }
+    this.timerPaused.set(false);
 
     this.secondsLeft.set(Math.max(0, Math.ceil((this.challengeDeadline - now) / 1000)));
     if (now > this.challengeDeadline) {
-      this.phase.set('failed');
-      this.failReason.set(
-        'El tiempo asignado se agotó sin completar la indicación. Una fotografía o imagen estática no puede realizar estos movimientos.',
+      this.fail(
+        'El tiempo para realizar el gesto se agotó.',
+        'Realice el gesto en cuanto aparezca la indicación en pantalla.',
       );
       return;
     }
 
-    this.evaluate(frame);
-    this.prevFrame = frame;
+    this.evaluate(frame, now);
   }
 
-  private evaluate(frame: LiveFrame): void {
+  private fail(reason: string, hint: string): void {
+    this.attempts.update((n) => n + 1);
+    this.failReason.set(reason);
+    this.retryHint.set(
+      this.maxAttemptsReached()
+        ? 'Se alcanzó el número máximo de intentos. Intente más tarde o desde otro dispositivo.'
+        : hint,
+    );
+    this.phase.set('failed');
+  }
+
+  private evaluate(frame: LiveFrame, now: number): void {
     const challenge = this.current();
     if (!challenge) return;
 
     let passed = false;
     switch (challenge.id) {
       case 'blink':
-        passed = this.evaluateBlink(frame);
+        passed = this.evaluateBlink(frame, now);
         break;
       case 'smile':
         passed = this.evaluateSmile(frame);
@@ -428,7 +505,7 @@ export class Verification implements OnInit, OnDestroy {
     if (challenge.id === 'smile') {
       const photo = this.faceService.captureFace(this.videoRef().nativeElement, frame.box);
       this.capturedPhoto.set(photo);
-      this.photoStorage.save(photo).catch((e) => console.error('No se pudo guardar la foto', e));
+      void this.savePhoto(photo);
     }
 
     this.challenges.update((list) =>
@@ -436,84 +513,163 @@ export class Verification implements OnInit, OnDestroy {
     );
 
     if (this.currentIndex() + 1 >= this.challenges().length) {
-      // Respaldo: si por alguna razón no hay fotografía, se toma una al aprobar.
       if (!this.capturedPhoto()) {
         const photo = this.faceService.captureFace(
           this.videoRef().nativeElement,
           this.lastBox ?? undefined,
         );
         this.capturedPhoto.set(photo);
-        this.photoStorage.save(photo).catch((e) => console.error('No se pudo guardar la foto', e));
+        void this.savePhoto(photo);
       }
-      this.phase.set('success');
       this.liveFeedback.set('');
+      this.phase.set('success');
+      // La cámara se apaga en cuanto deja de ser necesaria (señal de
+      // confianza en un flujo de identidad).
+      this.stopCamera();
     } else {
       this.currentIndex.update((i) => i + 1);
       this.resetChallengeState();
-      // Pausa entre retos: el gesto anterior (p. ej. el giro) no debe
-      // contaminar la evaluación del siguiente (p. ej. el parpadeo).
+      // Pausa entre retos: el gesto anterior no contamina el siguiente.
       this.settleUntil = Date.now() + Verification.SETTLE_MS;
-      this.liveFeedback.set('Correcto. Vuelva a mirar de frente…');
+      this.liveFeedback.set('Correcto. Prepárese para la siguiente indicación…');
     }
   }
 
-  /**
-   * Combina un umbral absoluto (valores típicos de ojo cerrado) con uno
-   * relativo a la mayor apertura observada en este reto, para adaptarse a
-   * cada cámara y persona. Un cierre profundo cuenta con un solo fotograma,
-   * por si la cámara entrega pocos fotogramas por segundo.
-   * Solo se evalúa con la cabeza de frente: al girar la cabeza los landmarks
-   * de los ojos se estrechan y producirían un falso parpadeo.
-   */
-  private evaluateBlink(frame: LiveFrame): boolean {
+  // ---- parpadeo: detector de valle y recuperación ----
+
+  /** Línea base robusta: percentil 75 de las muestras frontales recientes. */
+  private blinkBaseline(): { ear: number; earL: number; earR: number } | null {
+    const cutoff = Date.now() - Verification.BASELINE_WINDOW_MS;
+    const frontal = this.eyeBuf.filter(
+      (s) => s.t >= cutoff && Math.abs(s.yaw) <= Verification.FRONTAL_YAW_MAX,
+    );
+    if (frontal.length < Verification.BASELINE_MIN_SAMPLES) return null;
+    return {
+      ear: this.percentile(frontal.map((s) => s.ear), 75),
+      earL: this.percentile(frontal.map((s) => s.earL), 75),
+      earR: this.percentile(frontal.map((s) => s.earR), 75),
+    };
+  }
+
+  private percentile(values: number[], p: number): number {
+    const sorted = [...values].sort((a, b) => a - b);
+    const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
+    return sorted[idx];
+  }
+
+  private pushEyeSample(frame: LiveFrame, now: number): EyeSample {
+    const prev = this.eyeBuf[this.eyeBuf.length - 1];
+    const cx = frame.box.x + frame.box.width / 2;
+    const cy = frame.box.y + frame.box.height / 2;
+    let centerSpeed = 0;
+    let widthSpeed = 0;
+    let yawSpeed = 0;
+    if (prev) {
+      const dt = Math.max(0.016, (now - prev.t) / 1000);
+      centerSpeed = Math.hypot(cx - prev.cx, cy - prev.cy) / dt;
+      widthSpeed = Math.abs(frame.box.width - prev.w) / dt;
+      yawSpeed = Math.abs(frame.yaw - prev.yaw) / dt;
+    }
+    const sample: EyeSample = {
+      t: now,
+      ear: frame.eyeOpenness,
+      earL: frame.eyeOpennessLeft,
+      earR: frame.eyeOpennessRight,
+      yaw: frame.yaw,
+      cx,
+      cy,
+      w: frame.box.width,
+      centerSpeed,
+      widthSpeed,
+      yawSpeed,
+    };
+    this.eyeBuf.push(sample);
+    const cutoff = now - Verification.BUFFER_MS;
+    while (this.eyeBuf.length && this.eyeBuf[0].t < cutoff) this.eyeBuf.shift();
+    return sample;
+  }
+
+  private isSampleStill(s: EyeSample): boolean {
+    return (
+      s.centerSpeed < Verification.STILL_CENTER_SPEED &&
+      s.widthSpeed < Verification.STILL_WIDTH_SPEED &&
+      s.yawSpeed < Verification.STILL_YAW_SPEED
+    );
+  }
+
+  /** Mediana de las velocidades en la ventana previa al valle. */
+  private preDipWindowStill(now: number): boolean {
+    const windowSamples = this.eyeBuf.filter(
+      (s) => s.t >= now - Verification.PRE_OPEN_WINDOW_MS && s.t < now,
+    );
+    if (windowSamples.length < 2) return false;
+    const median = (values: number[]) => this.percentile(values, 50);
+    return (
+      median(windowSamples.map((s) => s.centerSpeed)) < Verification.STILL_CENTER_SPEED &&
+      median(windowSamples.map((s) => s.widthSpeed)) < Verification.STILL_WIDTH_SPEED &&
+      median(windowSamples.map((s) => s.yawSpeed)) < Verification.STILL_YAW_SPEED
+    );
+  }
+
+  private evaluateBlink(frame: LiveFrame, now: number): boolean {
     if (Math.abs(frame.yaw) > Verification.FRONTAL_YAW_MAX) {
-      this.consecutiveClosedFrames = 0;
-      this.eyesClosedConfirmed = false;
-      if (!this.liveFeedback()) this.liveFeedback.set('Mire de frente a la cámara para continuar.');
+      this.blinkPhase = 'open';
+      this.liveFeedback.set('Mire de frente a la cámara.');
       return false;
     }
-    // La cabeza (y la cámara) deben estar quietas mientras se detecta el
-    // cierre de ojos: inclinar o mover un teléfono con una foto desplaza toda
-    // la imagen y simula un parpadeo. Una vez confirmado el cierre, el
-    // movimiento leve al reabrir no penaliza.
-    if (!this.eyesClosedConfirmed && !this.isStill(frame)) {
-      this.consecutiveClosedFrames = 0;
-      if (!this.liveFeedback()) {
-        this.liveFeedback.set('Mantenga la cabeza quieta y parpadee.');
-      }
+
+    const sample = this.pushEyeSample(frame, now);
+    const base = this.blinkBaseline();
+    if (!base) {
+      this.liveFeedback.set('Mantenga la mirada al frente un momento…');
       return false;
     }
-    if (
-      this.liveFeedback() === 'Mire de frente a la cámara para continuar.' ||
-      this.liveFeedback() === 'Mantenga la cabeza quieta y parpadee.'
-    ) {
-      this.liveFeedback.set('');
-    }
 
-    this.baselineEyeOpenness = Math.max(this.baselineEyeOpenness, frame.eyeOpenness);
-    if (this.baselineEyeOpenness === 0) return false;
+    const ratio = sample.ear / base.ear;
 
-    const ear = frame.eyeOpenness;
-    const ratio = ear / this.baselineEyeOpenness;
-
-    if (!this.eyesClosedConfirmed) {
-      const closed = ear < Verification.CLOSED_ABSOLUTE || ratio < Verification.CLOSED_RATIO;
-      if (closed) {
-        this.consecutiveClosedFrames++;
-        const deepClose =
-          ear < Verification.CLOSED_DEEP_ABSOLUTE || ratio < Verification.CLOSED_DEEP_RATIO;
-        if (deepClose || this.consecutiveClosedFrames >= Verification.CLOSED_FRAMES_REQUIRED) {
-          this.eyesClosedConfirmed = true;
-          this.liveFeedback.set('Ojos cerrados detectados. Ahora abra los ojos.');
-        }
+    if (this.blinkPhase === 'open') {
+      const isDip = ratio <= Verification.DIP_RATIO || sample.ear <= Verification.DIP_ABSOLUTE;
+      const bilateral =
+        sample.earL / base.earL <= Verification.BILATERAL_RATIO &&
+        sample.earR / base.earR <= Verification.BILATERAL_RATIO;
+      const openRecently = this.eyeBuf.some(
+        (s) =>
+          s.t >= now - Verification.PRE_OPEN_WINDOW_MS &&
+          s.t < now &&
+          s.ear / base.ear >= Verification.REOPEN_RATIO,
+      );
+      if (
+        isDip &&
+        bilateral &&
+        this.isSampleStill(sample) &&
+        this.preDipWindowStill(now) &&
+        openRecently
+      ) {
+        this.blinkPhase = 'dip';
+        this.dipStart = now;
+        this.dipMin = sample.ear;
+        this.liveFeedback.set('Ojos cerrados detectados…');
       } else {
-        this.consecutiveClosedFrames = 0;
+        this.liveFeedback.set('');
       }
       return false;
     }
 
-    return ear > Verification.REOPEN_ABSOLUTE || ratio > Verification.REOPEN_RATIO;
+    // fase 'dip': esperando la reapertura
+    this.dipMin = Math.min(this.dipMin, sample.ear);
+    if (now - this.dipStart > Verification.MAX_DIP_MS) {
+      this.blinkPhase = 'open';
+      this.liveFeedback.set('Abra los ojos y parpadee de nuevo.');
+      return false;
+    }
+    const prominence = (base.ear - this.dipMin) / base.ear;
+    if (ratio >= Verification.REOPEN_RATIO && prominence >= Verification.PROMINENCE_MIN) {
+      return true;
+    }
+    return false;
   }
+
+  // ---- sonrisa y giro: transiciones obligatorias ----
 
   /**
    * La sonrisa debe ser una TRANSICIÓN: primero un gesto serio sostenido y
@@ -532,14 +688,16 @@ export class Verification implements OnInit, OnDestroy {
         }
       } else {
         this.neutralFrames = 0;
-        if (!this.liveFeedback()) {
-          this.liveFeedback.set('Primero mire de frente con gesto serio, sin sonreír.');
-        }
+        this.liveFeedback.set('Primero mire de frente con gesto serio, sin sonreír.');
       }
       return false;
     }
 
-    return frame.smile > Verification.SMILE_MIN && frontal;
+    if (!frontal) {
+      this.liveFeedback.set('Mire de frente y sonría ampliamente.');
+      return false;
+    }
+    return frame.smile > Verification.SMILE_MIN;
   }
 
   /**
@@ -559,9 +717,7 @@ export class Verification implements OnInit, OnDestroy {
         }
       } else {
         this.frontalFrames = 0;
-        if (!this.liveFeedback()) {
-          this.liveFeedback.set('Mire de frente a la cámara un momento.');
-        }
+        this.liveFeedback.set('Mire de frente a la cámara un momento.');
       }
       return false;
     }
@@ -577,12 +733,30 @@ export class Verification implements OnInit, OnDestroy {
     return Math.abs(frame.yaw) < Verification.RETURN_YAW_MAX;
   }
 
-  /** El centro del rostro debe caer dentro del óvalo guía. */
-  private isInsideOval(box: { x: number; y: number; width: number; height: number }): boolean {
+  /**
+   * El centro del rostro debe caer dentro del óvalo guía. El óvalo del CSS
+   * vive en coordenadas del recuadro visible; con object-fit: cover el video
+   * puede estar recortado, así que se convierte a coordenadas del video real.
+   */
+  private isInsideOval(
+    box: { x: number; y: number; width: number; height: number },
+    video: HTMLVideoElement,
+  ): boolean {
     const { cx, cy, rx, ry } = Verification.OVAL;
+    let rxVideo = rx;
+    let ryVideo = ry;
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const dw = video.clientWidth;
+    const dh = video.clientHeight;
+    if (vw && vh && dw && dh) {
+      const scale = Math.max(dw / vw, dh / vh);
+      rxVideo = (rx * dw) / (scale * vw);
+      ryVideo = (ry * dh) / (scale * vh);
+    }
     const faceCx = box.x + box.width / 2;
     const faceCy = box.y + box.height / 2;
-    const value = ((faceCx - cx) / rx) ** 2 + ((faceCy - cy) / ry) ** 2;
+    const value = ((faceCx - cx) / rxVideo) ** 2 + ((faceCy - cy) / ryVideo) ** 2;
     return value <= 1;
   }
 }

@@ -1,5 +1,5 @@
 <main class="page">
-  <div class="card">
+  <div class="card" [attr.aria-busy]="loading()">
     <div class="card-head">
       <h1>Fotografías capturadas</h1>
       <p class="subtitle">
@@ -8,42 +8,97 @@
       </p>
     </div>
 
-    <div class="toolbar">
-      <span class="meta">
-        {{ photos().length }} fotografía{{ photos().length === 1 ? '' : 's' }} ·
-        almacenamiento utilizado: {{ usedLabel() }}
-      </span>
-      @if (photos().length > 0) {
-        <button class="danger" (click)="removeAll()">Eliminar todas</button>
-      }
-    </div>
-
     @if (error()) {
-      <p class="error">{{ error() }}</p>
+      <p class="error" role="alert">{{ error() }}</p>
     }
 
     @if (loading()) {
-      <p class="empty">Cargando…</p>
-    } @else if (photos().length === 0 && !error()) {
-      <div class="empty">
-        <p>No hay fotografías almacenadas.</p>
-        <p class="empty-sub">
-          Las fotografías se guardan automáticamente al aprobar una verificación.
-        </p>
-      </div>
+      <p class="empty" role="status">Cargando fotografías…</p>
     } @else {
-      <ul class="grid">
-        @for (photo of photos(); track photo.id) {
-          <li class="item">
-            <img [src]="photo.url" alt="Fotografía de verificación" loading="lazy" />
-            <span class="date">{{ photo.createdAt | date: 'dd/MM/yyyy HH:mm' }}</span>
-            <div class="actions">
-              <a class="secondary" [href]="photo.downloadUrl">Descargar</a>
-              <button class="danger" (click)="remove(photo)">Eliminar</button>
-            </div>
-          </li>
+      <div class="toolbar">
+        <span class="meta">
+          {{ photos().length }} fotografía{{ photos().length === 1 ? '' : 's' }} ·
+          almacenamiento utilizado: {{ usedLabel() }}
+        </span>
+        @if (photos().length > 0) {
+          <button class="btn btn-danger btn-sm" (click)="askRemoveAll()" [disabled]="deleting()">
+            Eliminar todas
+          </button>
         }
-      </ul>
+      </div>
+
+      @if (photos().length === 0 && !error()) {
+        <div class="empty">
+          <p>No hay fotografías almacenadas.</p>
+          <p class="empty-sub">
+            Las fotografías se guardan automáticamente al aprobar una verificación.
+          </p>
+        </div>
+      } @else {
+        <ul class="grid">
+          @for (photo of photos(); track photo.id) {
+            <li class="item">
+              <img
+                [src]="photo.url"
+                [alt]="'Fotografía de verificación del ' + (photo.createdAt | date: 'dd/MM/yyyy HH:mm')"
+                loading="lazy"
+              />
+              <time class="date" [attr.datetime]="photo.createdAt">
+                {{ photo.createdAt | date: 'dd/MM/yyyy HH:mm' }}
+              </time>
+              <div class="actions">
+                <a
+                  class="btn btn-secondary btn-sm"
+                  [href]="photo.downloadUrl"
+                  download
+                  [attr.aria-label]="'Descargar fotografía del ' + (photo.createdAt | date: 'dd/MM/yyyy HH:mm')"
+                >
+                  Descargar
+                </a>
+                <button
+                  class="btn btn-danger btn-sm"
+                  (click)="askRemove(photo)"
+                  [disabled]="deleting()"
+                  [attr.aria-label]="'Eliminar fotografía del ' + (photo.createdAt | date: 'dd/MM/yyyy HH:mm')"
+                >
+                  Eliminar
+                </button>
+              </div>
+            </li>
+          }
+        </ul>
+      }
     }
   </div>
 </main>
+
+@if (pendingDelete(); as pending) {
+  <div class="modal-backdrop">
+    <div
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="delete-title"
+      (keydown.escape)="cancelDelete()"
+    >
+      <h2 id="delete-title">Confirmar eliminación</h2>
+      <p class="modal-text">
+        @if (pending.kind === 'all') {
+          Se eliminarán todas las fotografías almacenadas. Esta acción no se puede deshacer.
+        } @else {
+          Se eliminará la fotografía del
+          {{ pending.photo.createdAt | date: 'dd/MM/yyyy HH:mm' }}. Esta acción no se puede
+          deshacer.
+        }
+      </p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" (click)="cancelDelete()" [disabled]="deleting()">
+          Cancelar
+        </button>
+        <button class="btn btn-danger" (click)="confirmDelete()" [disabled]="deleting()">
+          {{ deleting() ? 'Eliminando…' : 'Eliminar' }}
+        </button>
+      </div>
+    </div>
+  </div>
+}
