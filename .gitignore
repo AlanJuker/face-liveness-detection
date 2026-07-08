@@ -46,3 +46,6 @@ Thumbs.db
 # Photo API server
 server/node_modules
 server/data
+
+# Claude Code local files
+.claude/
