@@ -136,6 +136,16 @@ export class Verification implements OnInit, OnDestroy {
 
   private lastBox: { x: number; y: number; width: number; height: number } | null = null;
   private stream: MediaStream | null = null;
+
+  // --- Identidad: la misma persona debe realizar toda la prueba ---
+  /** Descriptor facial de referencia, capturado al terminar el encuadre. */
+  private referenceDescriptor: Float32Array | null = null;
+  private computingReference = false;
+  /** Último instante con más de una cara (histéresis contra parpadeos del detector). */
+  private lastMultiFaceAt = 0;
+  /** Caja del fotograma anterior del bucle de prueba, para detectar saltos. */
+  private prevTickBox: { x: number; y: number; width: number; height: number } | null = null;
+  private challengeStartAt = 0;
   private loopTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   /** Elemento que abrió el popup, para devolverle el foco al cerrar. */
@@ -187,6 +197,17 @@ export class Verification implements OnInit, OnDestroy {
   private static readonly STILL_CENTER_SPEED = 0.2;
   private static readonly STILL_WIDTH_SPEED = 0.2;
   private static readonly STILL_YAW_SPEED = 0.6;
+
+  /** Distancia euclidiana máxima entre descriptores para ser la misma persona. */
+  private static readonly IDENTITY_MAX_DISTANCE = 0.55;
+  /** La alerta de varias caras persiste este tiempo tras la última detección. */
+  private static readonly MULTI_FACE_HOLD_MS = 1500;
+  /** Salto de posición/tamaño imposible para una cabeza real entre fotogramas:
+   * indica que se interpuso otra imagen; reinicia las transiciones del gesto. */
+  private static readonly TELEPORT_CENTER_DELTA = 0.18;
+  private static readonly TELEPORT_WIDTH_FACTOR = 0.6;
+  /** Tras estos ms sin detectar parpadeo se sugiere el cierre lento. */
+  private static readonly BLINK_HINT_AFTER_MS = 8000;
 
   private static readonly SMILE_MIN = 0.65;
   private static readonly NEUTRAL_MAX = 0.3;
@@ -276,6 +297,10 @@ export class Verification implements OnInit, OnDestroy {
 
   private beginPositioning(): void {
     this.stableFrames = 0;
+    this.referenceDescriptor = null;
+    this.computingReference = false;
+    this.prevTickBox = null;
+    this.lastMultiFaceAt = 0;
     this.capturedPhoto.set(null);
     this.saveState.set('idle');
     this.failReason.set('');
@@ -358,8 +383,10 @@ export class Verification implements OnInit, OnDestroy {
     this.frontalSeen = false;
     this.turnedSeen = false;
     this.faceAbsentSince = 0;
+    this.prevTickBox = null;
     this.liveFeedback.set('');
     this.timerPaused.set(false);
+    this.challengeStartAt = Date.now();
     this.challengeDeadline = Date.now() + Verification.CHALLENGE_SECONDS * 1000;
     this.secondsLeft.set(Verification.CHALLENGE_SECONDS);
   }
@@ -394,7 +421,12 @@ export class Verification implements OnInit, OnDestroy {
         console.error(e);
       }
       this.faceDetected.set(faces > 0);
-      this.multipleFaces.set(faces > 1);
+      // Histéresis: si hubo dos caras hace un instante, el bloqueo se mantiene
+      // aunque el detector pierda a la segunda por un fotograma.
+      if (faces > 1) this.lastMultiFaceAt = Date.now();
+      this.multipleFaces.set(
+        faces > 1 || Date.now() - this.lastMultiFaceAt < Verification.MULTI_FACE_HOLD_MS,
+      );
       this.faceInOval.set(frame ? this.isInsideOval(frame.box, video) : false);
       if (frame) this.lastBox = frame.box;
 
@@ -411,18 +443,28 @@ export class Verification implements OnInit, OnDestroy {
 
       if (this.phase() === 'positioning') {
         this.stableFrames = this.faceOk() ? this.stableFrames + 1 : 0;
-        if (this.stableFrames >= Verification.STABLE_FRAMES_REQUIRED) {
-          this.startTest();
+        if (this.stableFrames >= Verification.STABLE_FRAMES_REQUIRED && !this.computingReference) {
+          // Ancla de identidad: se captura el descriptor facial de la persona
+          // encuadrada; cada gesto completado se verificará contra él.
+          this.computingReference = true;
+          const descriptor = await this.faceService.computeDescriptor(video);
+          this.computingReference = false;
+          if (descriptor && this.phase() === 'positioning') {
+            this.referenceDescriptor = descriptor;
+            this.startTest();
+          } else {
+            this.stableFrames = 0;
+          }
         }
       } else if (this.phase() === 'testing') {
-        this.tickTesting(frame);
+        await this.tickTesting(frame);
       }
     }
 
     this.loopTimer = setTimeout(() => this.loop(), this.loopDelay());
   }
 
-  private tickTesting(frame: LiveFrame | null): void {
+  private async tickTesting(frame: LiveFrame | null): Promise<void> {
     const now = Date.now();
     const elapsed = this.lastTickAt ? Math.min(now - this.lastTickAt, 1000) : 0;
     this.lastTickAt = now;
@@ -454,9 +496,33 @@ export class Verification implements OnInit, OnDestroy {
     if (!frame || !this.faceOk()) {
       this.challengeDeadline += elapsed;
       this.timerPaused.set(true);
+      this.prevTickBox = frame?.box ?? null;
       return;
     }
     this.timerPaused.set(false);
+
+    // Salto imposible de posición o tamaño entre fotogramas: una cabeza real
+    // no se teletransporta, pero interponer un teléfono o cambiar de imagen
+    // sí lo hace. Se reinician las transiciones del gesto en curso.
+    if (this.prevTickBox) {
+      const dcx = Math.abs(
+        frame.box.x + frame.box.width / 2 - (this.prevTickBox.x + this.prevTickBox.width / 2),
+      );
+      const dcy = Math.abs(
+        frame.box.y + frame.box.height / 2 - (this.prevTickBox.y + this.prevTickBox.height / 2),
+      );
+      const widthJump =
+        Math.abs(frame.box.width - this.prevTickBox.width) >
+        this.prevTickBox.width * Verification.TELEPORT_WIDTH_FACTOR;
+      if (
+        dcx > Verification.TELEPORT_CENTER_DELTA ||
+        dcy > Verification.TELEPORT_CENTER_DELTA ||
+        widthJump
+      ) {
+        this.resetGestureTransitions();
+      }
+    }
+    this.prevTickBox = frame.box;
 
     this.secondsLeft.set(Math.max(0, Math.ceil((this.challengeDeadline - now) / 1000)));
     if (now > this.challengeDeadline) {
@@ -467,7 +533,18 @@ export class Verification implements OnInit, OnDestroy {
       return;
     }
 
-    this.evaluate(frame, now);
+    await this.evaluate(frame, now);
+  }
+
+  /** Reinicia las transiciones del gesto en curso sin tocar el temporizador. */
+  private resetGestureTransitions(): void {
+    this.eyeBuf = [];
+    this.blinkPhase = 'open';
+    this.neutralFrames = 0;
+    this.neutralSeen = false;
+    this.frontalFrames = 0;
+    this.frontalSeen = false;
+    this.turnedSeen = false;
   }
 
   private fail(reason: string, hint: string): void {
@@ -481,7 +558,7 @@ export class Verification implements OnInit, OnDestroy {
     this.phase.set('failed');
   }
 
-  private evaluate(frame: LiveFrame, now: number): void {
+  private async evaluate(frame: LiveFrame, now: number): Promise<void> {
     const challenge = this.current();
     if (!challenge) return;
 
@@ -499,6 +576,17 @@ export class Verification implements OnInit, OnDestroy {
     }
 
     if (!passed) return;
+
+    // La MISMA persona del encuadre inicial debe completar cada gesto: esto
+    // impide que dos personas se repartan la prueba o que se muestre la foto
+    // de otra persona en un teléfono para el gesto final.
+    if (!(await this.verifyIdentity())) {
+      this.fail(
+        'Se detectó un cambio de rostro durante la prueba.',
+        'La misma persona debe permanecer frente a la cámara y realizar todos los gestos, sin interponer imágenes.',
+      );
+      return;
+    }
 
     // La fotografía de evidencia se toma en el instante en que se detecta la
     // sonrisa, para que la persona salga sonriendo.
@@ -533,6 +621,25 @@ export class Verification implements OnInit, OnDestroy {
       this.settleUntil = Date.now() + Verification.SETTLE_MS;
       this.liveFeedback.set('Correcto. Prepárese para la siguiente indicación…');
     }
+  }
+
+  /**
+   * Compara el rostro actual contra el descriptor de referencia capturado en
+   * el encuadre. Dos intentos por si el cómputo falla transitoriamente.
+   */
+  private async verifyIdentity(): Promise<boolean> {
+    if (!this.referenceDescriptor) return false;
+    const video = this.videoRef().nativeElement;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const descriptor = await this.faceService.computeDescriptor(video);
+      if (descriptor) {
+        return (
+          this.faceService.descriptorDistance(this.referenceDescriptor, descriptor) <
+          Verification.IDENTITY_MAX_DISTANCE
+        );
+      }
+    }
+    return false;
   }
 
   // ---- parpadeo: detector de valle y recuperación ----
@@ -649,6 +756,8 @@ export class Verification implements OnInit, OnDestroy {
         this.dipStart = now;
         this.dipMin = sample.ear;
         this.liveFeedback.set('Ojos cerrados detectados…');
+      } else if (now - this.challengeStartAt > Verification.BLINK_HINT_AFTER_MS) {
+        this.liveFeedback.set('También puede cerrar los ojos un instante y volver a abrirlos.');
       } else {
         this.liveFeedback.set('');
       }

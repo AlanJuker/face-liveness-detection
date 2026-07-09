@@ -38,8 +38,29 @@ export class FaceRecognitionService {
       faceapi.nets.tinyFaceDetector.loadFromUri(modelPath),
       faceapi.nets.faceLandmark68Net.loadFromUri(modelPath),
       faceapi.nets.faceExpressionNet.loadFromUri(modelPath),
+      faceapi.nets.faceRecognitionNet.loadFromUri(modelPath),
     ]);
     this.modelsLoaded.set(true);
+  }
+
+  /**
+   * Descriptor facial de 128 dimensiones de la cara principal, para verificar
+   * que la MISMA persona realiza todos los gestos (impide que dos personas se
+   * repartan la prueba o que se interponga la foto de otra persona).
+   */
+  async computeDescriptor(video: HTMLVideoElement): Promise<Float32Array | null> {
+    const result = await faceapi
+      .detectSingleFace(
+        video,
+        new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }),
+      )
+      .withFaceLandmarks()
+      .withFaceDescriptor();
+    return result?.descriptor ?? null;
+  }
+
+  descriptorDistance(a: Float32Array, b: Float32Array): number {
+    return faceapi.euclideanDistance(a, b);
   }
 
   /**
