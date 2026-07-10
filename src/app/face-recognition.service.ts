@@ -63,6 +63,79 @@ export class FaceRecognitionService {
     return faceapi.euclideanDistance(a, b);
   }
 
+  private readonly sampleCanvas = document.createElement('canvas');
+
+  /**
+   * Heurística de accesorios que cubren el rostro, por análisis de color:
+   * - Mascarilla: boca Y ambas mejillas difieren mucho del tono de la frente
+   *   y además son uniformes entre sí (tela). Una barba no dispara la alerta
+   *   porque las mejillas superiores siguen siendo piel.
+   * - Lentes oscuros: ambas zonas de los ojos mucho más oscuras que la frente.
+   */
+  detectOcclusions(
+    video: HTMLVideoElement,
+    box: { x: number; y: number; width: number; height: number },
+  ): { mask: boolean; sunglasses: boolean } {
+    const W = 160;
+    const H = 120;
+    const canvas = this.sampleCanvas;
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return { mask: false, sunglasses: false };
+    ctx.drawImage(video, 0, 0, W, H);
+
+    const patch = (fx: number, fy: number) => {
+      const cx = Math.round((box.x + fx * box.width) * W);
+      const cy = Math.round((box.y + fy * box.height) * H);
+      const r = 3;
+      const x0 = Math.max(0, cx - r);
+      const y0 = Math.max(0, cy - r);
+      const w = Math.min(W - x0, r * 2);
+      const h = Math.min(H - y0, r * 2);
+      if (w <= 0 || h <= 0) return null;
+      const data = ctx.getImageData(x0, y0, w, h).data;
+      let rs = 0;
+      let gs = 0;
+      let bs = 0;
+      const n = data.length / 4;
+      for (let i = 0; i < data.length; i += 4) {
+        rs += data[i];
+        gs += data[i + 1];
+        bs += data[i + 2];
+      }
+      return { r: rs / n, g: gs / n, b: bs / n };
+    };
+
+    const forehead = patch(0.5, 0.18);
+    const cheekL = patch(0.26, 0.6);
+    const cheekR = patch(0.74, 0.6);
+    const mouth = patch(0.5, 0.78);
+    const eyeL = patch(0.31, 0.4);
+    const eyeR = patch(0.69, 0.4);
+    if (!forehead || !cheekL || !cheekR || !mouth || !eyeL || !eyeR) {
+      return { mask: false, sunglasses: false };
+    }
+
+    type RGB = { r: number; g: number; b: number };
+    const dist = (a: RGB, b: RGB) => Math.hypot(a.r - b.r, a.g - b.g, a.b - b.b);
+    const lum = (c: RGB) => 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+
+    const DIFF = 65;
+    const UNIFORM = 60;
+    const mask =
+      dist(mouth, forehead) > DIFF &&
+      dist(cheekL, forehead) > DIFF &&
+      dist(cheekR, forehead) > DIFF &&
+      dist(mouth, cheekL) < UNIFORM &&
+      dist(mouth, cheekR) < UNIFORM;
+
+    const fl = lum(forehead);
+    const sunglasses = fl > 50 && lum(eyeL) < fl * 0.45 && lum(eyeR) < fl * 0.45;
+
+    return { mask, sunglasses };
+  }
+
   /**
    * Analiza el fotograma actual detectando TODAS las caras presentes.
    * Devuelve cuántas hay y las métricas de vida (ojos, sonrisa, giro) de la

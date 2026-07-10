@@ -103,10 +103,13 @@ export class Verification implements OnInit, OnDestroy {
   readonly capturedPhoto = signal<string | null>(null);
 
   readonly faceOk = computed(
-    () => this.faceDetected() && !this.multipleFaces() && this.faceInOval(),
+    () =>
+      this.faceDetected() && !this.multipleFaces() && this.faceInOval() && !this.occlusionMsg(),
   );
   readonly faceBad = computed(
-    () => this.faceDetected() && (this.multipleFaces() || !this.faceInOval()),
+    () =>
+      this.faceDetected() &&
+      (this.multipleFaces() || !this.faceInOval() || !!this.occlusionMsg()),
   );
 
   readonly current = computed<Challenge | null>(
@@ -119,6 +122,7 @@ export class Verification implements OnInit, OnDestroy {
   readonly framingHint = computed(() => {
     if (!this.faceDetected()) return 'No se detecta su rostro. Colóquese frente a la cámara.';
     if (this.multipleFaces()) return 'Solo debe haber una persona frente a la cámara.';
+    if (this.occlusionMsg()) return this.occlusionMsg();
     if (!this.faceInOval()) return 'Centre su rostro dentro del óvalo.';
     return '';
   });
@@ -143,6 +147,10 @@ export class Verification implements OnInit, OnDestroy {
   private computingReference = false;
   /** Último instante con más de una cara (histéresis contra parpadeos del detector). */
   private lastMultiFaceAt = 0;
+  /** Mensaje de accesorio detectado (mascarilla / lentes oscuros). */
+  readonly occlusionMsg = signal('');
+  private occlusionStreak = 0;
+  private lastOcclusionCheckAt = 0;
   /** Caja del fotograma anterior del bucle de prueba, para detectar saltos. */
   private prevTickBox: { x: number; y: number; width: number; height: number } | null = null;
   private challengeStartAt = 0;
@@ -183,11 +191,19 @@ export class Verification implements OnInit, OnDestroy {
    * inclinar un teléfono desplaza toda la imagen justo en el instante del
    * falso "cierre", cosa que un parpadeo real no hace.
    */
-  private static readonly DIP_RATIO = 0.88;
+  private static readonly DIP_RATIO = 0.91;
   private static readonly DIP_ABSOLUTE = 0.24;
-  private static readonly BILATERAL_RATIO = 0.9;
+  private static readonly BILATERAL_RATIO = 0.93;
   private static readonly REOPEN_RATIO = 0.93;
-  private static readonly PROMINENCE_MIN = 0.08;
+  /**
+   * Prominencia mínima del valle, adaptativa: en ojos naturalmente más
+   * estrechos la caída del EAR al parpadear es proporcionalmente menor, así
+   * que se exige lo mayor entre un piso bajo (5 %) y 3 veces el ruido medido
+   * de la propia señal — sensible para todos, sin abrirse al ruido.
+   */
+  private static readonly PROMINENCE_FLOOR = 0.05;
+  private static readonly PROMINENCE_CEIL = 0.12;
+  private static readonly PROMINENCE_NOISE_FACTOR = 3;
   private static readonly PRE_OPEN_WINDOW_MS = 700;
   private static readonly MAX_DIP_MS = 2500;
   private static readonly BASELINE_WINDOW_MS = 2500;
@@ -301,6 +317,8 @@ export class Verification implements OnInit, OnDestroy {
     this.computingReference = false;
     this.prevTickBox = null;
     this.lastMultiFaceAt = 0;
+    this.occlusionStreak = 0;
+    this.occlusionMsg.set('');
     this.capturedPhoto.set(null);
     this.saveState.set('idle');
     this.failReason.set('');
@@ -430,13 +448,47 @@ export class Verification implements OnInit, OnDestroy {
       this.faceInOval.set(frame ? this.isInsideOval(frame.box, video) : false);
       if (frame) this.lastBox = frame.box;
 
+      // Detección de accesorios (mascarilla / lentes oscuros), ~2 veces/s.
+      const nowMs = Date.now();
+      if (
+        frame &&
+        (this.phase() === 'positioning' || this.phase() === 'testing') &&
+        nowMs - this.lastOcclusionCheckAt > 600
+      ) {
+        this.lastOcclusionCheckAt = nowMs;
+        try {
+          const occ = this.faceService.detectOcclusions(video, frame.box);
+          if (occ.mask || occ.sunglasses) {
+            this.occlusionStreak++;
+            this.occlusionMsg.set(
+              occ.mask
+                ? 'Retire la mascarilla o cubrebocas para continuar.'
+                : 'Retire los lentes oscuros para continuar.',
+            );
+          } else {
+            this.occlusionStreak = 0;
+            this.occlusionMsg.set('');
+          }
+        } catch (e) {
+          console.error(e);
+        }
+        // Durante la prueba, un accesorio confirmado es error inmediato.
+        if (this.occlusionStreak >= 2 && this.phase() === 'testing') {
+          this.fail(
+            'Se detectó un accesorio que cubre el rostro.',
+            'Retire mascarilla, lentes oscuros u otros accesorios y realice la verificación nuevamente.',
+          );
+        }
+      }
+
       if (this.debugMode) {
         const base = this.blinkBaseline();
         this.debugInfo.set(
           frame
             ? `caras: ${faces} · EAR: ${frame.eyeOpenness.toFixed(3)} (I ${frame.eyeOpennessLeft.toFixed(2)} / D ${frame.eyeOpennessRight.toFixed(2)}) · ` +
-                `base P75: ${base ? base.ear.toFixed(3) : '—'} · sonrisa: ${frame.smile.toFixed(2)} · giro: ${frame.yaw.toFixed(2)} · ` +
-                `óvalo: ${this.faceInOval()} · fase parpadeo: ${this.blinkPhase}`
+                `base P75: ${base ? base.ear.toFixed(3) : '—'} · prom req: ${base ? this.requiredProminence(base).toFixed(3) : '—'} · ` +
+                `sonrisa: ${frame.smile.toFixed(2)} · giro: ${frame.yaw.toFixed(2)} · ` +
+                `óvalo: ${this.faceInOval()} · accesorio: ${this.occlusionMsg() ? 'sí' : 'no'} · fase: ${this.blinkPhase}`
             : 'sin rostro',
         );
       }
@@ -644,18 +696,32 @@ export class Verification implements OnInit, OnDestroy {
 
   // ---- parpadeo: detector de valle y recuperación ----
 
-  /** Línea base robusta: percentil 75 de las muestras frontales recientes. */
-  private blinkBaseline(): { ear: number; earL: number; earR: number } | null {
+  /** Línea base robusta: percentil 75 de las muestras frontales recientes,
+   * más el ruido de la señal para calibrar la sensibilidad del valle. */
+  private blinkBaseline(): { ear: number; earL: number; earR: number; noise: number } | null {
     const cutoff = Date.now() - Verification.BASELINE_WINDOW_MS;
     const frontal = this.eyeBuf.filter(
       (s) => s.t >= cutoff && Math.abs(s.yaw) <= Verification.FRONTAL_YAW_MAX,
     );
     if (frontal.length < Verification.BASELINE_MIN_SAMPLES) return null;
+    const ears = frontal.map((s) => s.ear);
+    const mean = ears.reduce((a, b) => a + b, 0) / ears.length;
+    const variance = ears.reduce((a, b) => a + (b - mean) ** 2, 0) / ears.length;
     return {
-      ear: this.percentile(frontal.map((s) => s.ear), 75),
+      ear: this.percentile(ears, 75),
       earL: this.percentile(frontal.map((s) => s.earL), 75),
       earR: this.percentile(frontal.map((s) => s.earR), 75),
+      noise: Math.sqrt(variance),
     };
+  }
+
+  /** Prominencia mínima requerida del valle, según el ruido medido. */
+  private requiredProminence(base: { ear: number; noise: number }): number {
+    const noiseRatio = base.ear > 0 ? base.noise / base.ear : 1;
+    return Math.min(
+      Verification.PROMINENCE_CEIL,
+      Math.max(Verification.PROMINENCE_FLOOR, Verification.PROMINENCE_NOISE_FACTOR * noiseRatio),
+    );
   }
 
   private percentile(values: number[], p: number): number {
@@ -772,7 +838,7 @@ export class Verification implements OnInit, OnDestroy {
       return false;
     }
     const prominence = (base.ear - this.dipMin) / base.ear;
-    if (ratio >= Verification.REOPEN_RATIO && prominence >= Verification.PROMINENCE_MIN) {
+    if (ratio >= Verification.REOPEN_RATIO && prominence >= this.requiredProminence(base)) {
       return true;
     }
     return false;
