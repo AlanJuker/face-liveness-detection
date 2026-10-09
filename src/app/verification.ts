@@ -10,6 +10,7 @@ import {
   viewChild,
 } from '@angular/core';
 import { AnalyzeOptions, FaceRecognitionService, LiveFrame } from './face-recognition.service';
+import { percentile } from './liveness-math';
 import { PhotoStorageService } from './photo-storage.service';
 
 /**
@@ -708,9 +709,9 @@ export class Verification implements OnInit, OnDestroy {
     const mean = ears.reduce((a, b) => a + b, 0) / ears.length;
     const variance = ears.reduce((a, b) => a + (b - mean) ** 2, 0) / ears.length;
     return {
-      ear: this.percentile(ears, 75),
-      earL: this.percentile(frontal.map((s) => s.earL), 75),
-      earR: this.percentile(frontal.map((s) => s.earR), 75),
+      ear: percentile(ears, 75),
+      earL: percentile(frontal.map((s) => s.earL), 75),
+      earR: percentile(frontal.map((s) => s.earR), 75),
       noise: Math.sqrt(variance),
     };
   }
@@ -724,11 +725,6 @@ export class Verification implements OnInit, OnDestroy {
     );
   }
 
-  private percentile(values: number[], p: number): number {
-    const sorted = [...values].sort((a, b) => a - b);
-    const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
-    return sorted[idx];
-  }
 
   private pushEyeSample(frame: LiveFrame, now: number): EyeSample {
     const prev = this.eyeBuf[this.eyeBuf.length - 1];
@@ -776,7 +772,7 @@ export class Verification implements OnInit, OnDestroy {
       (s) => s.t >= now - Verification.PRE_OPEN_WINDOW_MS && s.t < now,
     );
     if (windowSamples.length < 2) return false;
-    const median = (values: number[]) => this.percentile(values, 50);
+    const median = (values: number[]) => percentile(values, 50);
     return (
       median(windowSamples.map((s) => s.centerSpeed)) < Verification.STILL_CENTER_SPEED &&
       median(windowSamples.map((s) => s.widthSpeed)) < Verification.STILL_WIDTH_SPEED &&

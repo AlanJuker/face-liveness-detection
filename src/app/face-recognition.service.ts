@@ -1,5 +1,6 @@
 import { Injectable, signal } from '@angular/core';
 import * as faceapi from '@vladmandic/face-api';
+import { eyeAspectRatio, headYaw } from './liveness-math';
 
 export interface LiveFrame {
   /** Qué tan abiertos están los ojos (Eye Aspect Ratio promedio). */
@@ -164,8 +165,8 @@ export class FaceRecognitionService {
     );
 
     const landmarks = primary.landmarks;
-    const eyeOpennessLeft = this.eyeAspectRatio(landmarks.getLeftEye());
-    const eyeOpennessRight = this.eyeAspectRatio(landmarks.getRightEye());
+    const eyeOpennessLeft = eyeAspectRatio(landmarks.getLeftEye());
+    const eyeOpennessRight = eyeAspectRatio(landmarks.getRightEye());
 
     const box = primary.detection.box;
     const vw = video.videoWidth || 1;
@@ -180,7 +181,7 @@ export class FaceRecognitionService {
         smile: withExpressions
           ? (primary as unknown as { expressions: { happy: number } }).expressions.happy
           : 0,
-        yaw: this.headYaw(landmarks),
+        yaw: headYaw(landmarks.positions),
         box: { x: box.x / vw, y: box.y / vh, width: box.width / vw, height: box.height / vh },
       },
     };
@@ -219,29 +220,5 @@ export class FaceRecognitionService {
     const ctx = canvas.getContext('2d')!;
     ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
     return canvas.toDataURL('image/jpeg', 0.92);
-  }
-
-  /** EAR clásico: (‖p2−p6‖ + ‖p3−p5‖) / (2·‖p1−p4‖). Ojo cerrado ≈ < 0.22. */
-  private eyeAspectRatio(eye: faceapi.Point[]): number {
-    const d = (a: faceapi.Point, b: faceapi.Point) => Math.hypot(a.x - b.x, a.y - b.y);
-    const horizontal = d(eye[0], eye[3]);
-    if (horizontal === 0) return 0;
-    return (d(eye[1], eye[5]) + d(eye[2], eye[4])) / (2 * horizontal);
-  }
-
-  /**
-   * Estima el giro de la cabeza comparando la distancia de la nariz a cada
-   * lado de la mandíbula. 0 = de frente; |yaw| > 0.35 = cabeza girada.
-   */
-  private headYaw(landmarks: faceapi.FaceLandmarks68): number {
-    const points = landmarks.positions;
-    const nose = points[30];
-    const jawLeft = points[0];
-    const jawRight = points[16];
-    const left = Math.abs(nose.x - jawLeft.x);
-    const right = Math.abs(jawRight.x - nose.x);
-    const total = left + right;
-    if (total === 0) return 0;
-    return (right - left) / total;
   }
 }
