@@ -1,5 +1,7 @@
 # Face Liveness Detection
 
+[![CI](https://github.com/AlanJuker/face-liveness-detection/actions/workflows/ci.yml/badge.svg)](https://github.com/AlanJuker/face-liveness-detection/actions/workflows/ci.yml)
+
 Face liveness detection app built with Angular, TensorFlow.js and face-api
 (`@vladmandic/face-api`). It verifies that a real person — not a photograph or
 a recording — is in front of the camera by asking for three gestures in random
@@ -47,6 +49,7 @@ npm install
 npm --prefix server install
 npm run server     # photo API on http://localhost:3000 (stores files in server/data)
 npm start          # app on http://localhost:4200 (proxies /api to :3000)
+npm test           # unit tests for the liveness math (Vitest)
 ```
 
 Without a `DATABASE_URL` the server stores photos as files in `server/data/`;
@@ -100,3 +103,6 @@ leaves the browser. The evidence photo captured on approval, however, is
 uploaded to the server and stored in PostgreSQL: that is biometric data, so
 make sure your privacy notice covers consent, purpose, and retention, and use
 the gallery's delete options to honor erasure requests.
+
+The photo API has no authentication: anyone who can reach the server can list
+or delete photos. Put it behind authentication before using it with real users.
