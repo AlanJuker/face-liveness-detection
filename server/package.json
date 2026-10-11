@@ -5,7 +5,8 @@
   "description": "Static host + evidence photo API (PostgreSQL) for the face liveness app",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "express": "^4.21.2",
