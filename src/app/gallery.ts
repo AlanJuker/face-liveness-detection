@@ -1,6 +1,6 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
-import { PhotoStorageService, StoredPhoto } from './photo-storage.service';
+import { PhotoStorageService, StoredPhoto, UnauthorizedError } from './photo-storage.service';
 
 type PendingDelete = { kind: 'one'; photo: StoredPhoto } | { kind: 'all' };
 
@@ -21,6 +21,10 @@ export class Gallery implements OnInit {
   readonly pendingDelete = signal<PendingDelete | null>(null);
   /** Ids con eliminación en curso, para deshabilitar sus botones. */
   readonly deleting = signal(false);
+  /** La API exige sesión: se muestra el formulario de contraseña. */
+  readonly needsLogin = signal(false);
+  readonly loginError = signal('');
+  readonly loggingIn = signal(false);
 
   readonly usedLabel = computed(() => {
     const bytes = this.usedBytes();
@@ -33,6 +37,33 @@ export class Gallery implements OnInit {
     await this.refresh();
   }
 
+  async login(password: string): Promise<void> {
+    if (!password || this.loggingIn()) return;
+    this.loggingIn.set(true);
+    this.loginError.set('');
+    try {
+      if (await this.storage.login(password)) {
+        this.needsLogin.set(false);
+        this.loading.set(true);
+        await this.refresh();
+      } else {
+        this.loginError.set('Contraseña incorrecta.');
+      }
+    } catch (e) {
+      console.error(e);
+      this.loginError.set('No se pudo iniciar sesión. Intente nuevamente.');
+    } finally {
+      this.loggingIn.set(false);
+    }
+  }
+
+  async logout(): Promise<void> {
+    await this.storage.logout();
+    this.photos.set([]);
+    this.usedBytes.set(0);
+    this.needsLogin.set(true);
+  }
+
   private async refresh(): Promise<void> {
     this.error.set('');
     try {
@@ -40,6 +71,10 @@ export class Gallery implements OnInit {
       this.photos.set(listing.photos);
       this.usedBytes.set(listing.totalBytes);
     } catch (e) {
+      if (e instanceof UnauthorizedError) {
+        this.needsLogin.set(true);
+        return;
+      }
       console.error(e);
       this.error.set('No se pudieron cargar las fotografías. Intente nuevamente.');
     } finally {
@@ -72,9 +107,13 @@ export class Gallery implements OnInit {
       this.pendingDelete.set(null);
       await this.refresh();
     } catch (e) {
+      this.pendingDelete.set(null);
+      if (e instanceof UnauthorizedError) {
+        this.needsLogin.set(true);
+        return;
+      }
       console.error(e);
       this.error.set('No se pudo completar la eliminación. Intente nuevamente.');
-      this.pendingDelete.set(null);
     } finally {
       this.deleting.set(false);
     }
