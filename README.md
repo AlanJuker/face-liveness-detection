@@ -31,7 +31,7 @@ PostgreSQL so they can be reviewed, downloaded, and deleted from any browser.
   server-side (PostgreSQL on Railway, or local files during development), so
   the gallery is accessible from any browser. It lists photos with capture
   date and storage usage, and lets you download or delete them (individually
-  or all at once) to free up space.
+  or all at once) to free up space. Protected by an admin password.
 - **Institutional UI**: formal Spanish copy, blue/white palette, responsive
   layout.
 
@@ -47,9 +47,9 @@ PostgreSQL so they can be reviewed, downloaded, and deleted from any browser.
 ```bash
 npm install
 npm --prefix server install
-npm run server     # photo API on http://localhost:3000 (stores files in server/data)
-npm start          # app on http://localhost:4200 (proxies /api to :3000)
-npm test           # unit tests for the liveness math (Vitest)
+GALLERY_PASSWORD=dev npm run server   # photo API on http://localhost:3000 (stores files in server/data)
+npm start                             # app on http://localhost:4200 (proxies /api to :3000)
+npm test                              # unit tests for the liveness math (Vitest)
 ```
 
 Without a `DATABASE_URL` the server stores photos as files in `server/data/`;
@@ -61,10 +61,17 @@ open the app with `?debug`, e.g. `http://localhost:4200/?debug`.
 | Method | Route              | Description                          |
 | ------ | ------------------ | ------------------------------------ |
 | POST   | `/api/photos`      | Save a photo (`{ dataUrl }`, JPEG)   |
-| GET    | `/api/photos`      | List photos + total storage used     |
-| GET    | `/api/photos/:id`  | Get a photo (`?download` to attach)  |
-| DELETE | `/api/photos/:id`  | Delete one photo                     |
-| DELETE | `/api/photos`      | Delete all photos                    |
+| POST   | `/api/session`     | Log in to the gallery (`{ password }`) |
+| DELETE | `/api/session`     | Log out                              |
+| GET    | `/api/photos`      | List photos + total storage used 🔒  |
+| GET    | `/api/photos/:id`  | Get a photo (`?download` to attach) 🔒 |
+| DELETE | `/api/photos/:id`  | Delete one photo 🔒                  |
+| DELETE | `/api/photos`      | Delete all photos 🔒                 |
+
+🔒 Requires the admin session: an `HttpOnly`, `SameSite=Strict` cookie that
+expires after 8 hours and is signed with HMAC. Without `GALLERY_PASSWORD` these
+routes stay closed. Uploading stays public so the verification flow can save
+the evidence photo.
 
 ## Deploying to Railway
 
@@ -76,7 +83,9 @@ photo API) and a `railway.json`.
    repo** and pick this repository. Railway auto-detects the Dockerfile.
 2. In the same project: **Create → Database → Add PostgreSQL**.
 3. On the app service: **Variables → New Variable → Add Reference** and select
-   the Postgres `DATABASE_URL`. Railway redeploys automatically.
+   the Postgres `DATABASE_URL`. Add `GALLERY_PASSWORD` with a long random
+   value (`openssl rand -base64 24`) to unlock the gallery. Railway redeploys
+   automatically.
 4. Go to **Settings → Networking** and click **Generate Domain** to get the
    public URL.
 
@@ -84,8 +93,7 @@ Notes:
 
 - `getUserMedia` (camera access) requires HTTPS; the `*.up.railway.app` domain
   already provides it — no extra configuration needed.
-- `PORT` is injected by Railway automatically; only `DATABASE_URL` needs to be
-  referenced.
+- `PORT` is injected by Railway automatically.
 
 ## Testing the Docker image locally
 
@@ -104,5 +112,6 @@ uploaded to the server and stored in PostgreSQL: that is biometric data, so
 make sure your privacy notice covers consent, purpose, and retention, and use
 the gallery's delete options to honor erasure requests.
 
-The photo API has no authentication: anyone who can reach the server can list
-or delete photos. Put it behind authentication before using it with real users.
+Only an administrator with `GALLERY_PASSWORD` can view, download or delete the
+stored photos. Login attempts are not rate-limited yet, so use a long random
+password.

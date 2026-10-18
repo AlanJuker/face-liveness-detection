@@ -1,10 +1,56 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
 const app = express();
+app.set('trust proxy', 1); // Railway termina TLS en su proxy: req.secure refleja HTTPS
 app.use(express.json({ limit: '15mb' }));
+
+/**
+ * Sesión de administrador para la galería. La cookie lleva su vencimiento
+ * firmado con HMAC usando GALLERY_PASSWORD como clave: cambiar la contraseña
+ * invalida todas las sesiones. Sin GALLERY_PASSWORD la galería queda cerrada.
+ */
+const SESSION_COOKIE = 'gallery_session';
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+const sign = (value) =>
+  crypto.createHmac('sha256', process.env.GALLERY_PASSWORD).update(value).digest('hex');
+
+const safeEqual = (a, b) => {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+};
+
+function readCookie(req, name) {
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const [key, ...rest] = part.trim().split('=');
+    if (key === name) return rest.join('=');
+  }
+  return null;
+}
+
+function hasSession(req) {
+  if (!process.env.GALLERY_PASSWORD) return false;
+  const [expires, signature] = (readCookie(req, SESSION_COOKIE) || '').split('.');
+  if (!expires || !signature || Number(expires) < Date.now()) return false;
+  return safeEqual(signature, sign(expires));
+}
+
+function requireSession(req, res, next) {
+  if (hasSession(req)) return next();
+  res.status(401).json({ error: 'Se requiere iniciar sesión' });
+}
+
+const cookieOptions = (req) => ({
+  httpOnly: true,
+  sameSite: 'strict',
+  secure: req.secure,
+  path: '/',
+});
 
 /**
  * Almacenamiento de fotografías de evidencia.
@@ -111,7 +157,29 @@ console.log(`Photo store: ${store.kind}`);
 
 // ---- API ----
 
-app.get('/api/photos', async (_req, res) => {
+app.post('/api/session', (req, res) => {
+  const password = req.body?.password;
+  if (
+    !process.env.GALLERY_PASSWORD ||
+    typeof password !== 'string' ||
+    !safeEqual(sign(password), sign(process.env.GALLERY_PASSWORD))
+  ) {
+    return res.status(401).json({ error: 'Contraseña incorrecta' });
+  }
+  const expires = String(Date.now() + SESSION_TTL_MS);
+  res.cookie(SESSION_COOKIE, `${expires}.${sign(expires)}`, {
+    ...cookieOptions(req),
+    maxAge: SESSION_TTL_MS,
+  });
+  res.status(204).end();
+});
+
+app.delete('/api/session', (req, res) => {
+  res.clearCookie(SESSION_COOKIE, cookieOptions(req));
+  res.status(204).end();
+});
+
+app.get('/api/photos', requireSession, async (_req, res) => {
   try {
     const photos = await store.list();
     const totalBytes = photos.reduce((sum, p) => sum + p.bytes, 0);
@@ -137,7 +205,7 @@ app.post('/api/photos', async (req, res) => {
   }
 });
 
-app.get('/api/photos/:id', async (req, res) => {
+app.get('/api/photos/:id', requireSession, async (req, res) => {
   try {
     const data = await store.get(req.params.id);
     if (!data) return res.status(404).end();
@@ -152,7 +220,7 @@ app.get('/api/photos/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/photos/:id', async (req, res) => {
+app.delete('/api/photos/:id', requireSession, async (req, res) => {
   try {
     await store.remove(req.params.id);
     res.status(204).end();
@@ -162,7 +230,7 @@ app.delete('/api/photos/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/photos', async (_req, res) => {
+app.delete('/api/photos', requireSession, async (_req, res) => {
   try {
     await store.clear();
     res.status(204).end();
@@ -190,4 +258,8 @@ if (fs.existsSync(publicDir)) {
   });
 }
 
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+}
+
+module.exports = app;

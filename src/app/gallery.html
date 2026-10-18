@@ -12,7 +12,26 @@
       <p class="error" role="alert">{{ error() }}</p>
     }
 
-    @if (loading()) {
+    @if (needsLogin()) {
+      <form class="login" (submit)="$event.preventDefault(); login(password.value)">
+        <label for="gallery-password">Contraseña de administrador</label>
+        <input
+          #password
+          id="gallery-password"
+          type="password"
+          autocomplete="current-password"
+          required
+          [attr.aria-invalid]="!!loginError()"
+          [attr.aria-describedby]="loginError() ? 'login-error' : null"
+        />
+        @if (loginError()) {
+          <p id="login-error" class="error" role="alert">{{ loginError() }}</p>
+        }
+        <button class="btn btn-primary" type="submit" [disabled]="loggingIn()">
+          {{ loggingIn() ? 'Ingresando…' : 'Ingresar' }}
+        </button>
+      </form>
+    } @else if (loading()) {
       <p class="empty" role="status">Cargando fotografías…</p>
     } @else {
       <div class="toolbar">
@@ -20,11 +39,14 @@
           {{ photos().length }} fotografía{{ photos().length === 1 ? '' : 's' }} ·
           almacenamiento utilizado: {{ usedLabel() }}
         </span>
-        @if (photos().length > 0) {
-          <button class="btn btn-danger btn-sm" (click)="askRemoveAll()" [disabled]="deleting()">
-            Eliminar todas
-          </button>
-        }
+        <span class="toolbar-actions">
+          @if (photos().length > 0) {
+            <button class="btn btn-danger btn-sm" (click)="askRemoveAll()" [disabled]="deleting()">
+              Eliminar todas
+            </button>
+          }
+          <button class="btn btn-secondary btn-sm" (click)="logout()">Cerrar sesión</button>
+        </span>
       </div>
 
       @if (photos().length === 0 && !error()) {

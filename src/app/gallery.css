@@ -51,6 +51,32 @@ h1 {
   flex-wrap: wrap;
 }
 
+.toolbar-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.login {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-width: 22rem;
+}
+
+.login label {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.login input {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--blue-200);
+  border-radius: 8px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+}
+
 .meta {
   font-size: var(--fs-sm);
   color: var(--ink-soft);
