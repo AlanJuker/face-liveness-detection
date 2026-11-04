@@ -13,6 +13,9 @@ export interface StoredPhoto {
 /** La API respondió 401: hace falta iniciar sesión en la galería. */
 export class UnauthorizedError extends Error {}
 
+/** La API respondió 429: demasiadas contraseñas incorrectas desde esta IP. */
+export class TooManyAttemptsError extends Error {}
+
 const ensureOk = (response: Response, message: string) => {
   if (response.status === 401) throw new UnauthorizedError(message);
   if (!response.ok) throw new Error(`${message} (${response.status})`);
@@ -41,6 +44,7 @@ export class PhotoStorageService {
       body: JSON.stringify({ password }),
     });
     if (response.status === 401) return false;
+    if (response.status === 429) throw new TooManyAttemptsError('Demasiados intentos fallidos');
     ensureOk(response, 'Error al iniciar sesión');
     return true;
   }
