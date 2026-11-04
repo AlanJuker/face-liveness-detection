@@ -37,7 +37,7 @@ PostgreSQL so they can be reviewed, downloaded, and deleted from any browser.
 
 ## Tech stack
 
-- Angular 20 (standalone components, signals, new control flow)
+- Angular 22 (standalone components, signals, new control flow)
 - `@vladmandic/face-api` (maintained face-api.js fork, bundles TensorFlow.js)
 - Models: TinyFaceDetector, 68-point face landmarks, face expressions
 - Express + PostgreSQL (evidence photo API); Docker for deployment
