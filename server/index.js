@@ -45,6 +45,25 @@ function requireSession(req, res, next) {
   res.status(401).json({ error: 'Se requiere iniciar sesión' });
 }
 
+/**
+ * Límite de intentos de inicio de sesión: tras LOGIN_MAX_FAILURES contraseñas
+ * incorrectas desde una IP, esa IP recibe 429 hasta que pasen LOGIN_WINDOW_MS
+ * desde el primer fallo. Un inicio de sesión correcto reinicia la cuenta.
+ * ponytail: en memoria y por proceso; con varias instancias haría falta un almacén compartido.
+ */
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const loginFailures = new Map(); // ip -> { count, resetAt }
+
+function recordLoginFailure(ip, now) {
+  for (const [key, entry] of loginFailures) {
+    if (entry.resetAt <= now) loginFailures.delete(key);
+  }
+  const entry = loginFailures.get(ip) || { count: 0, resetAt: now + LOGIN_WINDOW_MS };
+  entry.count += 1;
+  loginFailures.set(ip, entry);
+}
+
 const cookieOptions = (req) => ({
   httpOnly: true,
   sameSite: 'strict',
@@ -158,14 +177,22 @@ console.log(`Photo store: ${store.kind}`);
 // ---- API ----
 
 app.post('/api/session', (req, res) => {
+  const now = Date.now();
+  const failures = loginFailures.get(req.ip);
+  if (failures && failures.resetAt > now && failures.count >= LOGIN_MAX_FAILURES) {
+    res.set('Retry-After', String(Math.ceil((failures.resetAt - now) / 1000)));
+    return res.status(429).json({ error: 'Demasiados intentos fallidos' });
+  }
   const password = req.body?.password;
   if (
     !process.env.GALLERY_PASSWORD ||
     typeof password !== 'string' ||
     !safeEqual(sign(password), sign(process.env.GALLERY_PASSWORD))
   ) {
+    recordLoginFailure(req.ip, now);
     return res.status(401).json({ error: 'Contraseña incorrecta' });
   }
+  loginFailures.delete(req.ip);
   const expires = String(Date.now() + SESSION_TTL_MS);
   res.cookie(SESSION_COOKIE, `${expires}.${sign(expires)}`, {
     ...cookieOptions(req),

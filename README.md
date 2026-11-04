@@ -37,7 +37,7 @@ PostgreSQL so they can be reviewed, downloaded, and deleted from any browser.
 
 ## Tech stack
 
-- Angular 20 (standalone components, signals, new control flow)
+- Angular 22 (standalone components, signals, new control flow)
 - `@vladmandic/face-api` (maintained face-api.js fork, bundles TensorFlow.js)
 - Models: TinyFaceDetector, 68-point face landmarks, face expressions
 - Express + PostgreSQL (evidence photo API); Docker for deployment
@@ -70,7 +70,9 @@ open the app with `?debug`, e.g. `http://localhost:4200/?debug`.
 
 🔒 Requires the admin session: an `HttpOnly`, `SameSite=Strict` cookie that
 expires after 8 hours and is signed with HMAC. Without `GALLERY_PASSWORD` these
-routes stay closed. Uploading stays public so the verification flow can save
+routes stay closed. After 5 wrong passwords from one IP, `POST /api/session`
+answers `429` (with `Retry-After`) for 15 minutes from the first failure; a
+correct login resets the count. Uploading stays public so the verification flow can save
 the evidence photo.
 
 ## Deploying to Railway
@@ -113,5 +115,6 @@ make sure your privacy notice covers consent, purpose, and retention, and use
 the gallery's delete options to honor erasure requests.
 
 Only an administrator with `GALLERY_PASSWORD` can view, download or delete the
-stored photos. Login attempts are not rate-limited yet, so use a long random
-password.
+stored photos. Login attempts are limited to 5 failures per IP every 15 minutes,
+kept in memory, so the limit resets when the server restarts and applies per
+instance. Still use a long random password.

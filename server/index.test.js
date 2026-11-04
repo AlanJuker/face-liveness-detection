@@ -84,3 +84,15 @@ test('logout clears the cookie', async () => {
   assert.equal(response.status, 204);
   assert.match(response.headers.get('set-cookie'), /gallery_session=;/);
 });
+
+// Last: it leaves the test IP locked out
+test('repeated wrong passwords lock the login, and a correct one resets the count', async () => {
+  for (let i = 0; i < 4; i++) assert.equal((await login('nope')).status, 401);
+  assert.equal((await login('test-password')).status, 204);
+
+  for (let i = 0; i < 5; i++) assert.equal((await login('nope')).status, 401);
+  const locked = await login('test-password');
+  assert.equal(locked.status, 429);
+  const retryAfter = Number(locked.headers.get('retry-after'));
+  assert.ok(retryAfter > 0 && retryAfter <= 15 * 60, `Retry-After: ${retryAfter}`);
+});

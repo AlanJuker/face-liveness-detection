@@ -1,6 +1,11 @@
 import { Component, OnInit, computed, inject, signal } from '@angular/core';
 import { DatePipe } from '@angular/common';
-import { PhotoStorageService, StoredPhoto, UnauthorizedError } from './photo-storage.service';
+import {
+  PhotoStorageService,
+  StoredPhoto,
+  TooManyAttemptsError,
+  UnauthorizedError,
+} from './photo-storage.service';
 
 type PendingDelete = { kind: 'one'; photo: StoredPhoto } | { kind: 'all' };
 
@@ -50,6 +55,10 @@ export class Gallery implements OnInit {
         this.loginError.set('Contraseña incorrecta.');
       }
     } catch (e) {
+      if (e instanceof TooManyAttemptsError) {
+        this.loginError.set('Demasiados intentos fallidos. Espere 15 minutos e intente nuevamente.');
+        return;
+      }
       console.error(e);
       this.loginError.set('No se pudo iniciar sesión. Intente nuevamente.');
     } finally {
